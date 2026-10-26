@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.pdb
+*.ilk
+.env
+.env.*
+!.env.example
+*.log
+.vscode/
+.idea/

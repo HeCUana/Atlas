@@ -1,0 +1,17 @@
+# Atlas 的 Cargo 配置
+#
+# 关键项：aws-lc-sys 的 NASM 依赖
+#
+# russh 的默认加密后端是 aws-lc-rs，而 aws-lc-sys 在 Windows x86_64 上
+# 默认需要本机安装 NASM 汇编器。本机没有 NASM，会导致构建直接失败：
+#
+#     thread 'main' panicked at aws-lc-sys-0.46.0/builder/nasm_builder.rs:
+#     NASM command not found! Build cannot continue.
+#
+# aws-lc-sys 自带 x86_64 Windows 的预编译目标文件
+# （builder/prebuilt-nasm/*.obj），设置 AWS_LC_SYS_PREBUILT_NASM=1 即可启用，
+# 无需安装任何外部工具。
+#
+# 注意：不要同时设置 AWS_LC_SYS_NO_ASM，两者互斥（aws-lc-sys 会直接报错）。
+[env]
+AWS_LC_SYS_PREBUILT_NASM = "1"
