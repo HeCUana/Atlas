@@ -1,0 +1,22 @@
+[package]
+name = "atlas-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Atlas 插件系统：清单解析、插件发现、注册表与热重载"
+
+[dependencies]
+atlas-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+libloading.workspace = true
+tar.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
