@@ -1,0 +1,22 @@
+[package]
+name = "atlas-parser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Atlas 日志识别与解析：把服务端控制台行解析为结构化日志事件"
+
+[dependencies]
+atlas-core.workspace = true
+anyhow.workspace = true
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+# 日志 profile 覆盖文件（TOML）解析
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
