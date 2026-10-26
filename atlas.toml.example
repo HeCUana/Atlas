@@ -1,0 +1,50 @@
+# Atlas 配置示例
+#
+# 复制为 atlas.toml 后按需修改。相对路径一律以 Atlas 进程的工作目录为基准解析。
+
+# 被托管的 Minecraft 服务端
+[[servers]]
+id = "survival"
+name = "生存服"
+workdir = "servers/survival"
+command = "java"
+args = ["-jar", "server.jar", "nogui"]
+# 额外的 JVM 参数（会拼在 args 之前）
+jvm_args = ["-Xms2G", "-Xmx2G"]
+# 是否随 Atlas 启动
+auto_start = true
+# 附加环境变量
+[servers.env]
+JAVA_TOOL_OPTIONS = ""
+
+[[servers]]
+id = "creative"
+name = "创造服"
+workdir = "servers/creative"
+command = "java"
+args = ["-jar", "server.jar", "nogui"]
+jvm_args = ["-Xms4G", "-Xmx4G"]
+auto_start = false
+
+# 数据源模式：log（终端日志抓取）或 mod（Mod 获取接口）
+[data_source]
+mode = "log"
+# 相对路径或绝对路径控制服务器控制台
+path = "logs"
+
+# 事件总线容量（broadcast 通道大小；满了会淘汰最旧事件）
+event_capacity = 1024
+
+# 插件目录
+plugin_dir = "plugins"
+
+# 日志解析 profile 覆盖文件（可选）
+# log_profiles = "log-profiles.toml"
+
+# SFTP 远程文件管理（可选）
+# [sftp]
+# host = "10.0.0.5"
+# port = 22
+# username = "atlas"
+# key_path = "keys/id_ed25519"
+# root = "/home/mc"
