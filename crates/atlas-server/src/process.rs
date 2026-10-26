@@ -148,7 +148,12 @@ impl ManagedServer {
         }
 
         let mut child = cmd.spawn().map_err(|e| {
-            atlas_core::AtlasError::Process(format!("启动 {} 失败: {e}", config.id))
+            atlas_core::AtlasError::Process(format!(
+                "启动 {} 失败（命令: {}，工作目录: {}）：{e}",
+                config.id,
+                config.command,
+                config.workdir.display()
+            ))
         })?;
 
         let stdin = child.stdin.take();
@@ -204,6 +209,37 @@ impl ManagedServer {
     /// 设置状态（由 Supervisor 在状态变化时调用）。
     pub fn set_state(&mut self, state: ServerState) {
         self.state = state;
+    }
+
+    /// 非阻塞检查子进程是否已经退出。
+    ///
+    /// 返回 `Some(code)` 表示进程已退出（状态同步更新：退出码 0 → `Stopped`，
+    /// 非 0 → `Failed`）；`None` 表示仍在运行。
+    ///
+    /// 没有这个探测，托管进程意外崩溃时宿主会毫无反应——
+    /// 运维看到的就是"日志突然不动了"，和"卡死"很难区分。
+    pub fn poll_exit(&mut self) -> Option<i32> {
+        let child = self.child.as_mut()?;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(-1);
+                self.child = None;
+                self.stdin = None;
+                self.state = if code == 0 {
+                    ServerState::Stopped
+                } else {
+                    ServerState::Failed
+                };
+                Some(code)
+            }
+            Ok(None) => None,
+            Err(_) => {
+                self.child = None;
+                self.stdin = None;
+                self.state = ServerState::Failed;
+                Some(-1)
+            }
+        }
     }
 
     /// 订阅控制台输出行。

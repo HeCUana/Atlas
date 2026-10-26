@@ -8,3 +8,11 @@
 *.log
 .vscode/
 .idea/
+
+# 本地运行产物（由 `atlas init` / `atlas start` 自动生成，不应提交）
+/atlas.toml
+/log-profiles.toml
+/plugins/
+/logs/
+/servers/
+/keys/

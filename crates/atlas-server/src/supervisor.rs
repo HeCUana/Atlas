@@ -68,10 +68,21 @@ impl Supervisor {
     }
 
     /// 停止指定服务器。
+    ///
+    /// 服务器不在本进程的托管列表中时：
+    /// - 配置里根本没有这台服务器 → [`atlas_core::AtlasError::UnknownServer`]；
+    /// - 配置里有，但不由本进程启动 → [`atlas_core::AtlasError::NotManaged`]。
+    ///
+    /// 区分这两种情况很重要：Atlas 的每次命令行调用都是独立进程，
+    /// "配置里有这台服务器但它不是本进程管的" 与 "配置里压根没这台" 排查方向完全不同。
     pub async fn stop(&mut self, id: &str) -> Result<()> {
         let key = ServerId::new(id);
         let Some(mut managed) = self.servers.remove(&key) else {
-            return Err(atlas_core::AtlasError::UnknownServer(id.to_owned()));
+            return Err(if self.config.server(id).is_some() {
+                atlas_core::AtlasError::NotManaged(id.to_owned())
+            } else {
+                atlas_core::AtlasError::UnknownServer(id.to_owned())
+            });
         };
         self.publish_state(&key, ServerState::Stopping, None);
         let result = managed.stop(self.stop_timeout).await;
@@ -170,5 +181,29 @@ impl Supervisor {
             state,
             detail,
         }));
+    }
+
+    /// 轮询各托管服务器，发现进程已经退出时更新状态并发出事件。
+    ///
+    /// 返回本次发现退出的服务器及其新状态，供上层展示。
+    ///
+    /// 没有这个探测，托管进程意外崩溃时宿主毫无反应——
+    /// 运维看到"日志突然不动了"，很难和"卡死"区分开。
+    pub fn poll_changes(&mut self) -> Vec<(ServerId, ServerState)> {
+        // 先收集再发布：`publish_state` 需要 `&self`，不能在 `iter_mut` 借用期间调用。
+        let mut collected = Vec::new();
+        for (id, managed) in self.servers.iter_mut() {
+            let Some(code) = managed.poll_exit() else {
+                continue;
+            };
+            collected.push((id.clone(), managed.state(), code));
+        }
+
+        let mut changes = Vec::with_capacity(collected.len());
+        for (id, state, code) in collected {
+            self.publish_state(&id, state, Some(format!("进程已退出（退出码 {code}）")));
+            changes.push((id, state));
+        }
+        changes
     }
 }

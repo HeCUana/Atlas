@@ -136,7 +136,10 @@ impl Atlas {
     }
 
     /// 为每台服务器启动"原始行 → 结构化事件"的日志泵。
-    fn spawn_log_pumps(&self) -> Vec<tokio::task::JoinHandle<()>> {
+    ///
+    /// `echo` 为真时，同时把原始行按 `[服务器ID] ` 前缀打印到标准输出——
+    /// 无界面模式下这是运维唯一能看到的运行状态。
+    fn spawn_log_pumps(&self, echo: bool) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = Vec::new();
         for id in self.config.server_ids() {
             let Some(mut rx) = self.supervisor.subscribe_lines(id.as_str()) else {
@@ -149,6 +152,9 @@ impl Atlas {
                 loop {
                     match rx.recv().await {
                         Ok(line) => {
+                            if echo {
+                                println!("[{server_id}] {line}");
+                            }
                             let event = parser.parse(&server_id, &line);
                             bus.publish(Event::Log(event));
                         }
@@ -199,28 +205,49 @@ async fn async_run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Start { servers } => {
             let targets = resolve_targets(&atlas.config, servers, true);
+            if targets.is_empty() {
+                print_nothing_to_start(&atlas.config);
+                return Ok(());
+            }
             for id in &targets {
                 atlas.supervisor.start(id).await?;
-                println!("已启动 {id}");
             }
-            let _pumps = atlas.spawn_log_pumps();
-            wait_forever().await;
+            print_start_banner(&atlas.config, &targets);
+            let _pumps = atlas.spawn_log_pumps(true);
+            wait_for_shutdown(&mut atlas.supervisor).await;
         }
         Commands::Stop { servers } => {
             let targets = resolve_targets(&atlas.config, servers, false);
+            if targets.is_empty() {
+                println!("配置里没有服务器，无需停止。");
+                return Ok(());
+            }
+            let mut failures = Vec::new();
             for id in &targets {
-                atlas.supervisor.stop(id).await?;
-                println!("已停止 {id}");
+                match atlas.supervisor.stop(id).await {
+                    Ok(()) => println!("已停止 {id}"),
+                    Err(e) => {
+                        eprintln!("停止 {id} 失败: {e}");
+                        failures.push(id.clone());
+                    }
+                }
+            }
+            if !failures.is_empty() {
+                anyhow::bail!("以下服务器未能停止: {}", failures.join(", "));
             }
         }
         Commands::Restart { servers } => {
             let targets = resolve_targets(&atlas.config, servers, false);
+            if targets.is_empty() {
+                print_nothing_to_start(&atlas.config);
+                return Ok(());
+            }
             for id in &targets {
                 atlas.supervisor.restart(id).await?;
-                println!("已重启 {id}");
             }
-            let _pumps = atlas.spawn_log_pumps();
-            wait_forever().await;
+            print_start_banner(&atlas.config, &targets);
+            let _pumps = atlas.spawn_log_pumps(true);
+            wait_for_shutdown(&mut atlas.supervisor).await;
         }
         Commands::Logs {
             server,
@@ -353,15 +380,90 @@ fn load_config(path: &std::path::Path) -> Result<AtlasConfig> {
     Ok(AtlasConfig::default())
 }
 
-async fn wait_forever() {
-    let _ = tokio::signal::ctrl_c().await;
+/// 没有任何服务器可启动时的提示。
+///
+/// 必须给出**可操作**的下一步，否则用户只会看到命令"卡住不动"。
+fn print_nothing_to_start(config: &AtlasConfig) {
+    if config.servers.is_empty() {
+        println!("配置里还没有任何服务器，所以没有可启动的进程。");
+        println!();
+        println!("下一步：");
+        println!(
+            "  1. 编辑 atlas.toml，把 [[servers]] 段的注释去掉并填写（示例见 atlas.toml.example）"
+        );
+        println!("  2. 或运行 `atlas init` 生成一份带注释示例的配置");
+        println!("  3. 然后运行 `atlas start <服务器ID>`");
+        return;
+    }
+    println!(
+        "没有需要启动的服务器：共配置了 {} 台，但都没有设置 auto_start = true。",
+        config.servers.len()
+    );
+    println!();
+    println!("可用的服务器：");
+    for s in &config.servers {
+        println!("  - {}", s.id);
+    }
+    println!();
+    println!("用 `atlas start <服务器ID>` 显式启动其中一台。");
+}
+
+/// 启动横幅：明确告诉用户现在处于什么状态、怎么看输出、怎么退出。
+fn print_start_banner(config: &AtlasConfig, targets: &[String]) {
+    println!("已启动 {} 台服务器：", targets.len());
+    for id in targets {
+        match config.server(id) {
+            Some(s) => println!("  - {id}  ({})", s.display_name()),
+            None => println!("  - {id}"),
+        }
+    }
+    println!();
+    println!("以下为各服务器的实时输出（Ctrl+C 将优雅停止全部服务器）：");
+}
+
+/// 等待 Ctrl+C，然后优雅停止所有托管中的服务器。
+///
+/// Atlas 退出前要先把停止命令投递给子进程并等待其优雅退出，超时后再强制终止；
+/// 不能让子进程被 `kill_on_drop` 直接硬杀——那会丢失服务端的世界存档。
+///
+/// 等待期间每 2 秒轮询一次各服务器的存活状态：某个服务端意外崩溃时立刻提示，
+/// 否则运维只能看到"日志突然不动了"，很难和"卡死"区分开。
+async fn wait_for_shutdown(supervisor: &mut Supervisor) {
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            result = &mut ctrl_c => {
+                if let Err(e) = result {
+                    tracing::warn!("监听 Ctrl+C 失败: {e}");
+                }
+                break;
+            }
+            _ = ticker.tick() => {
+                for (id, state) in supervisor.poll_changes() {
+                    eprintln!("[{id}] 进程已退出，当前状态：{state}");
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("正在停止所有服务器…");
+    let errors = supervisor.stop_all().await;
+    for (id, e) in errors {
+        eprintln!("停止 {id} 失败: {e}");
+    }
+    println!("全部服务器已停止。");
 }
 
 /// 启动 TUI，并把事件流灌进界面。
 async fn run_tui(atlas: &mut Atlas) -> Result<()> {
     use atlas_tui::App;
 
-    let _pumps = atlas.spawn_log_pumps();
+    let _pumps = atlas.spawn_log_pumps(false);
 
     let mut app = App::new(atlas.config.clone(), atlas.bus.clone());
     let mut bus_rx = atlas.bus.subscribe();
@@ -545,7 +647,7 @@ mod tests {
         let mut rx = atlas.bus.subscribe();
 
         atlas.supervisor.start("fake").await.expect("启动应成功");
-        let _pumps = atlas.spawn_log_pumps();
+        let _pumps = atlas.spawn_log_pumps(false);
 
         // 等待事件到达（最多 10 秒）。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -569,6 +671,39 @@ mod tests {
         assert_eq!(log.timestamp.as_deref(), Some("12:34:56"));
 
         let _ = atlas.supervisor.stop("fake").await;
+    }
+
+    #[test]
+    fn 空配置时_start_不会挂住而是提示后返回() {
+        // 回归测试：`atlas start` 在没有可启动服务器时曾经什么都不打印就永久等待，
+        // 用户只看到"卡住不动"。这里锁定"目标为空 → 走提示分支 → 立即返回"的语义。
+        let config = AtlasConfig::default();
+        let targets = resolve_targets(&config, Vec::new(), true);
+        assert!(targets.is_empty(), "空配置不应解析出任何启动目标");
+        // 提示分支必须能安全执行（不 panic）。
+        print_nothing_to_start(&config);
+    }
+
+    #[test]
+    fn 配置有服务器但都没开自动启动时_start_不挂住() {
+        let mk = |id: &str, auto: bool| atlas_core::ServerConfig {
+            id: id.into(),
+            name: String::new(),
+            workdir: std::env::temp_dir(),
+            command: "cmd".into(),
+            args: Vec::new(),
+            env: Default::default(),
+            jvm_args: Vec::new(),
+            auto_start: auto,
+            log_path: None,
+        };
+        let config = AtlasConfig {
+            servers: vec![mk("a", false)],
+            ..Default::default()
+        };
+        assert!(resolve_targets(&config, Vec::new(), true).is_empty());
+        assert_eq!(resolve_targets(&config, Vec::new(), false), vec!["a"]);
+        print_nothing_to_start(&config);
     }
 
     #[test]

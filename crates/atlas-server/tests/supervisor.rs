@@ -11,7 +11,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 mod common;
 
-use common::{MODE_SERVE, helper_config};
+use common::{MODE_EXIT, MODE_SERVE, helper_config};
 
 /// 单个测试的等待上限。
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -147,6 +147,80 @@ async fn unknown_server_returns_unknown_server_error() {
 
     let err = supervisor.restart("nope").await.expect_err("应报错");
     assert!(matches!(err, AtlasError::UnknownServer(ref id) if id == "nope"));
+}
+
+#[tokio::test]
+async fn 配置里存在但未托管的服务器应报_not_managed() {
+    // s1 在配置里，但本进程没有启动它 —— 属于"不由本进程托管"，
+    // 与"配置里压根没有这台服务器"是两种不同的问题，错误类型必须区分开。
+    let config = config_with(&[("s1", true)]);
+    let bus = EventBus::new(64);
+    let mut supervisor = Supervisor::new(config, bus);
+
+    let err = supervisor.stop("s1").await.expect_err("应报错");
+    assert!(
+        matches!(err, AtlasError::NotManaged(ref id) if id == "s1"),
+        "期望 NotManaged，实际 {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn 子进程意外退出应被轮询察觉并标记为失败() {
+    let mut config = AtlasConfig::default();
+    config.servers.push(helper_config("boom", MODE_EXIT, 3));
+    let bus = EventBus::new(64);
+    let mut rx = bus.subscribe();
+    let mut supervisor = Supervisor::new(config, bus);
+
+    supervisor.start("boom").await.expect("启动应成功");
+
+    // 等子进程真正退出，再轮询。
+    let mut changes = Vec::new();
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        changes = supervisor.poll_changes();
+        if !changes.is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(changes.len(), 1, "应恰好检测到一次退出，实际 {changes:?}");
+    let (id, state) = &changes[0];
+    assert_eq!(id.as_str(), "boom");
+    assert_eq!(*state, ServerState::Failed, "非零退出码应标记为 Failed");
+
+    // 同时应发出状态事件。注意 start 时已经发过一条 `Running`，
+    // 所以这里要一直读到 `Failed` 那条为止。
+    let mut failed_event = None;
+    for _ in 0..20 {
+        let event = next_state_event(&mut rx).await;
+        if event.state == ServerState::Failed {
+            failed_event = Some(event);
+            break;
+        }
+    }
+    let event = failed_event.expect("应收到状态为 Failed 的事件");
+    assert_eq!(event.server.as_str(), "boom");
+    assert!(
+        event.detail.unwrap_or_default().contains("3"),
+        "事件详情应带上退出码"
+    );
+}
+
+#[tokio::test]
+async fn 仍在运行的子进程不应被轮询误报() {
+    let mut config = AtlasConfig::default();
+    config.servers.push(helper_config("alive", MODE_SERVE, 0));
+    let bus = EventBus::new(64);
+    let mut supervisor = Supervisor::new(config, bus);
+
+    supervisor.start("alive").await.expect("启动应成功");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    assert!(
+        supervisor.poll_changes().is_empty(),
+        "运行中的服务器不应被判定为退出"
+    );
 }
 
 #[tokio::test]

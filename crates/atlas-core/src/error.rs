@@ -18,6 +18,10 @@ pub enum AtlasError {
     #[error("服务器不存在: {0}")]
     UnknownServer(String),
 
+    /// 服务器在配置里存在，但不由当前进程托管。
+    #[error("服务器 {0} 未由本进程托管（不在本进程启动的实例列表中）")]
+    NotManaged(String),
+
     /// 权限校验未通过。
     #[error("权限不足：{subject} 无权执行 {action}（目标：{resource}）")]
     PermissionDenied {
