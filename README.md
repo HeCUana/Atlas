@@ -93,6 +93,27 @@ cargo run -p atlas-cli -- --help
 
 > **Windows 构建提示**：`russh` 的默认加密后端 `aws-lc-rs` 在 Windows x86_64 上默认需要本机安装 NASM 汇编器。仓库内的 [`.cargo/config.toml`](.cargo/config.toml) 已设置 `AWS_LC_SYS_PREBUILT_NASM=1`，改用 `aws-lc-sys` 自带的预编译目标文件，**无需安装任何外部工具**。
 
+### 2.2 首次运行：自动生成配置与目录
+
+新克隆的仓库里没有配置也没有目录。Atlas **不会**因为这些缺失而失败或静默降级——它会自己补齐：
+
+```console
+$ atlas init
+已生成配置文件: atlas.toml
+已创建服务器根目录: servers
+已创建目录: plugins
+已创建目录: logs
+
+下一步：编辑 atlas.toml 添加服务器，然后用 `atlas start` 启动。
+```
+
+- **`atlas init`**：显式脚手架。生成 `atlas.toml` 模板（服务器段落以注释给出，取消注释即可启用）、`servers/`、`plugins/`、日志目录。`--force` 可覆盖已有配置。
+- **任何子命令首次运行**：若 `atlas.toml` 不存在，会自动生成同一份模板并建好目录，然后继续执行（不会因为缺配置而只跑一个空默认值）。
+- **每次运行**：配置里引用到的目录若不存在会被补建——服务端的 `workdir` 缺失会导致进程直接启动失败，插件目录缺失会让插件发现静默返回空列表，这两处必须存在。
+- **幂等**：已存在的配置**不会**被覆盖（除非显式 `--force`），已存在的目录直接跳过。
+
+相对路径一律以 **Atlas 进程的工作目录**为基准解析。
+
 ---
 
 ## 3. 运行时架构
@@ -565,6 +586,7 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | 插件生命周期顺序 | 停止事件订阅 → 注销命令 → 释放句柄 → 卸载 → 加载新实例（已用 `PluginLifecycle` trait 建模并用 mock 验证调用序列） |
 | 终端命令返回信息的采集语义 | 基于日志行的**启发式提取**，带超时窗口；窗口内无输出返回 `None`，有输出返回 `Some(文本)`。结果不保证完整或权威 |
 | `ConsoleBridge` 的可测试性 | 抽取 `ConsoleSource` trait，`ManagedServer` 实现之，采集逻辑可用 mock 单测 |
+| 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`） |
 
 ### 12.2 仍待决策
 

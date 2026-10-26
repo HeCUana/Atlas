@@ -228,4 +228,107 @@ impl AtlasConfig {
             .map(|s| crate::server::ServerId::new(s.id.clone()))
             .collect()
     }
+
+    /// 脚手架需要创建的**服务器根目录**。
+    ///
+    /// 新建服务器时把 `workdir` 放在这个目录下比较省心。
+    pub const DEFAULT_SERVERS_DIR: &'static str = "servers";
+
+    /// 返回运行期**必须存在**的目录。
+    ///
+    /// 包含：
+    /// - 插件目录（[`Self::plugin_dir`]）；
+    /// - 日志目录（`data_source` 为 `Log` 时的 `path`；
+    ///   若该路径看起来是**文件**（有扩展名）则取其父目录，否则当作目录本身）；
+    /// - 每台服务器的 `workdir`。
+    ///
+    /// 目录不存在时应当被创建——服务端的 `workdir` 缺失会导致进程启动失败，
+    /// 而插件目录缺失会让插件发现静默返回空列表。
+    pub fn required_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+
+        if !self.plugin_dir.as_os_str().is_empty() {
+            dirs.push(self.plugin_dir.clone());
+        }
+
+        if let DataSource::Log { path } = &self.data_source
+            && !path.as_os_str().is_empty()
+        {
+            // 带扩展名 → 视为日志文件，取其父目录；否则视为目录本身。
+            let dir = if path.extension().is_some() {
+                path.parent().map(Path::to_path_buf).unwrap_or_default()
+            } else {
+                path.clone()
+            };
+            if !dir.as_os_str().is_empty() {
+                dirs.push(dir);
+            }
+        }
+
+        for server in &self.servers {
+            if !server.workdir.as_os_str().is_empty() {
+                dirs.push(server.workdir.clone());
+            }
+        }
+
+        dirs
+    }
+
+    /// 生成一份可用的配置模板（TOML 文本）。
+    ///
+    /// 模板本身是**合法的 TOML**，可以直接被 [`Self::load_from`] 读回；
+    /// 服务器段落以注释形式给出，取消注释即可启用。
+    pub fn template_toml() -> String {
+        let mut out = String::new();
+        out.push_str(
+            "# Atlas 配置文件\n\
+             #\n\
+             # 本文件由 `atlas init` 自动生成。\n\
+             # 相对路径一律以 Atlas 进程的工作目录为基准解析。\n\
+             \n\
+             # ── 被托管的 Minecraft 服务端 ─────────────────────────────────\n\
+             # 取消注释并按需修改即可添加一台服务器。\n\
+             #\n\
+             # [[servers]]\n\
+             # id = \"survival\"                  # 全局唯一\n\
+             # name = \"生存服\"                   # 显示名\n\
+             # workdir = \"servers/survival\"      # 服务端 jar 所在目录（不存在会自动创建）\n\
+             # command = \"java\"                  # 启动命令\n\
+             # args = [\"-jar\", \"server.jar\", \"nogui\"]\n\
+             # jvm_args = [\"-Xms2G\", \"-Xmx2G\"]   # 会拼在 args 之前\n\
+             # auto_start = true                  # 是否随 Atlas 启动\n\
+             #\n\
+             # # 附加环境变量\n\
+             # [servers.env]\n\
+             # JAVA_TOOL_OPTIONS = \"\"\n\
+             \n\
+             # ── 数据源模式 ─────────────────────────────────────────────\n\
+             # mode = \"log\"  终端日志抓取（需要 path）\n\
+             # mode = \"mod\"  Mod 获取接口（需要 host / port）\n\
+             [data_source]\n\
+             mode = \"log\"\n\
+             path = \"logs\"\n\
+             \n\
+             # ── 事件总线容量 ─────────────────────────────────────────────\n\
+             # 广播通道大小；满了会淘汰最旧事件，落后消费者会收到 Lagged 信号。\n\
+             event_capacity = 1024\n\
+             \n\
+             # ── 插件目录 ─────────────────────────────────────────────────\n\
+             # 支持单文件插件、`.atlas` 打包插件、`.rs` 源码插件与文件夹插件。\n\
+             plugin_dir = \"plugins\"\n\
+             \n\
+             # ── 日志解析 profile 覆盖（可选） ─────────────────────────────\n\
+             # 覆盖内置的 Log4j2 / CraftBukkit 解析规则。\n\
+             # log_profiles = \"log-profiles.toml\"\n\
+             \n\
+             # ── SFTP 远程文件管理（可选） ────────────────────────────────\n\
+             # [sftp]\n\
+             # host = \"127.0.0.1\"\n\
+             # port = 22\n\
+             # username = \"atlas\"\n\
+             # key_path = \"keys/id_ed25519\"\n\
+             # root = \"/home/mc\"\n",
+        );
+        out
+    }
 }

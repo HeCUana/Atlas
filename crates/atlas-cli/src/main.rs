@@ -31,6 +31,8 @@ use atlas_parser::LogParser;
 use atlas_server::{ConsoleBridge, Supervisor};
 use clap::{Parser, Subcommand};
 
+mod scaffold;
+
 #[derive(Parser, Debug)]
 #[command(name = "atlas", version, about = "Atlas — Minecraft 多服务器管理工具")]
 struct Cli {
@@ -82,6 +84,12 @@ enum Commands {
     },
     /// 检查配置文件。
     Config,
+    /// 生成配置文件与必要目录。
+    Init {
+        /// 覆盖已存在的配置文件。
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -180,7 +188,12 @@ fn init_tracing() {
 }
 
 async fn async_run(cli: Cli) -> Result<()> {
-    let config = load_config(&cli.config)?;
+    // `init` 不要求配置已存在：文件在就沿用它，不在就用默认值去生成。
+    let config = match &cli.command {
+        Commands::Init { .. } => load_config_if_exists(&cli.config)?.unwrap_or_default(),
+        _ => load_config(&cli.config)?,
+    };
+
     let mut atlas = Atlas::new(config);
 
     match cli.command {
@@ -278,6 +291,15 @@ async fn async_run(cli: Cli) -> Result<()> {
             println!("插件目录: {}", atlas.config.plugin_dir.display());
             println!("事件容量: {}", atlas.config.event_capacity);
         }
+        Commands::Init { force } => {
+            let result = scaffold::scaffold(&cli.config, &atlas.config, force, true)?;
+            println!("{}", result.summary());
+            println!();
+            println!(
+                "下一步：编辑 {} 添加服务器，然后用 `atlas start` 启动。",
+                cli.config.display()
+            );
+        }
     }
 
     Ok(())
@@ -296,13 +318,39 @@ fn resolve_targets(config: &AtlasConfig, requested: Vec<String>, auto_only: bool
         .collect()
 }
 
+/// 若配置文件存在则读取它，否则返回 `None`（**不**创建任何文件）。
+fn load_config_if_exists(path: &std::path::Path) -> Result<Option<AtlasConfig>> {
+    if path.exists() {
+        AtlasConfig::load_from(path)
+            .context("加载配置失败")
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// 加载配置；文件缺失时自动生成模板与必要目录。
 fn load_config(path: &std::path::Path) -> Result<AtlasConfig> {
     if path.exists() {
-        AtlasConfig::load_from(path).context("加载配置失败")
-    } else {
-        // 配置文件不存在时使用默认配置，方便快速试跑。
-        Ok(AtlasConfig::default())
+        let config = AtlasConfig::load_from(path).context("加载配置失败")?;
+        // 补建缺失目录：服务端的 workdir 缺失会导致进程启动失败，
+        // 插件目录缺失会让插件发现静默返回空列表。
+        for dir in scaffold::ensure_dirs(&config)? {
+            println!("已创建目录: {}", dir.display());
+        }
+        return Ok(config);
     }
+
+    // 首次运行：自动生成配置模板与必要目录。
+    let result = scaffold::scaffold(path, &AtlasConfig::default(), false, false)?;
+    if result.created_config.is_some() {
+        println!("已生成配置文件: {}", path.display());
+        println!("请编辑该文件添加服务器（示例已以注释形式写在文件里）。");
+    }
+    for dir in &result.created_dirs {
+        println!("已创建目录: {}", dir.display());
+    }
+    Ok(AtlasConfig::default())
 }
 
 async fn wait_forever() {
@@ -427,29 +475,21 @@ mod tests {
 
     #[test]
     fn 未指定服务器时按_auto_start_筛选() {
-        let mut config = AtlasConfig::default();
-        config.servers.push(atlas_core::ServerConfig {
-            id: "a".into(),
+        let mk = |id: &str, auto: bool| atlas_core::ServerConfig {
+            id: id.into(),
             name: String::new(),
             workdir: std::env::temp_dir(),
             command: "cmd".into(),
             args: Vec::new(),
             env: Default::default(),
             jvm_args: Vec::new(),
-            auto_start: true,
+            auto_start: auto,
             log_path: None,
-        });
-        config.servers.push(atlas_core::ServerConfig {
-            id: "b".into(),
-            name: String::new(),
-            workdir: std::env::temp_dir(),
-            command: "cmd".into(),
-            args: Vec::new(),
-            env: Default::default(),
-            jvm_args: Vec::new(),
-            auto_start: false,
-            log_path: None,
-        });
+        };
+        let config = AtlasConfig {
+            servers: vec![mk("a", true), mk("b", false)],
+            ..Default::default()
+        };
 
         assert_eq!(resolve_targets(&config, Vec::new(), true), vec!["a"]);
         assert_eq!(resolve_targets(&config, Vec::new(), false), vec!["a", "b"]);
@@ -462,7 +502,6 @@ mod tests {
 
     #[test]
     fn 配置校验拒绝重复的服务器_id() {
-        let mut config = AtlasConfig::default();
         let base = atlas_core::ServerConfig {
             id: "same".into(),
             name: String::new(),
@@ -474,8 +513,10 @@ mod tests {
             auto_start: false,
             log_path: None,
         };
-        config.servers.push(base.clone());
-        config.servers.push(base);
+        let config = AtlasConfig {
+            servers: vec![base.clone(), base],
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
@@ -485,18 +526,20 @@ mod tests {
         let raw = "[12:34:56] [Server thread/INFO]: Done (3.214s)!";
         let (command, args) = fake_server_command(raw);
 
-        let mut config = AtlasConfig::default();
-        config.servers.push(atlas_core::ServerConfig {
-            id: "fake".into(),
-            name: "假服务端".into(),
-            workdir: std::env::temp_dir(),
-            command,
-            args,
-            env: Default::default(),
-            jvm_args: Vec::new(),
-            auto_start: true,
-            log_path: None,
-        });
+        let config = AtlasConfig {
+            servers: vec![atlas_core::ServerConfig {
+                id: "fake".into(),
+                name: "假服务端".into(),
+                workdir: std::env::temp_dir(),
+                command,
+                args,
+                env: Default::default(),
+                jvm_args: Vec::new(),
+                auto_start: true,
+                log_path: None,
+            }],
+            ..Default::default()
+        };
 
         let mut atlas = Atlas::new(config);
         let mut rx = atlas.bus.subscribe();
@@ -526,5 +569,61 @@ mod tests {
         assert_eq!(log.timestamp.as_deref(), Some("12:34:56"));
 
         let _ = atlas.supervisor.stop("fake").await;
+    }
+
+    #[test]
+    fn 脚手架会生成配置文件与必要目录() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let config_path = tmp.path().join("atlas.toml");
+
+        let config = AtlasConfig {
+            plugin_dir: tmp.path().join("plugins"),
+            data_source: atlas_core::DataSource::Log {
+                path: tmp.path().join("logs"),
+            },
+            ..Default::default()
+        };
+
+        let result =
+            scaffold::scaffold(&config_path, &config, false, false).expect("脚手架不应失败");
+
+        assert!(result.created_config.is_some(), "应生成配置文件");
+        assert!(config_path.exists());
+        assert!(tmp.path().join("plugins").is_dir(), "应创建插件目录");
+        assert!(tmp.path().join("logs").is_dir(), "应创建日志目录");
+
+        // 生成的配置必须能被读回，且没有服务器。
+        let loaded = AtlasConfig::load_from(&config_path).expect("生成的配置应可读回");
+        assert!(loaded.servers.is_empty());
+    }
+
+    #[test]
+    fn 脚手架是幂等的_不会覆盖已有配置() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let config_path = tmp.path().join("atlas.toml");
+        std::fs::write(&config_path, "# 我自己写的配置\n").expect("应能写入");
+
+        let result = scaffold::scaffold(&config_path, &AtlasConfig::default(), false, false)
+            .expect("脚手架不应失败");
+
+        assert!(result.created_config.is_none(), "已有配置不应被覆盖");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("应能读取"),
+            "# 我自己写的配置\n"
+        );
+    }
+
+    #[test]
+    fn 脚手架_force_会覆盖已有配置() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let config_path = tmp.path().join("atlas.toml");
+        std::fs::write(&config_path, "# 旧配置\n").expect("应能写入");
+
+        let result = scaffold::scaffold(&config_path, &AtlasConfig::default(), true, false)
+            .expect("脚手架不应失败");
+
+        assert!(result.created_config.is_some());
+        let content = std::fs::read_to_string(&config_path).expect("应能读取");
+        assert!(content.contains("[data_source]"));
     }
 }
