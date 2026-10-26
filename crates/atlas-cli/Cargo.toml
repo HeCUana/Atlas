@@ -1,0 +1,32 @@
+[package]
+name = "atlas-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Atlas 命令行入口"
+
+[[bin]]
+name = "atlas"
+path = "src/main.rs"
+
+[dependencies]
+atlas-core.workspace = true
+atlas-parser.workspace = true
+atlas-server.workspace = true
+atlas-plugin.workspace = true
+atlas-sftp.workspace = true
+atlas-tui.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
