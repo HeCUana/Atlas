@@ -1,0 +1,21 @@
+[package]
+name = "atlas-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Atlas TUI：服务器总览与子进程控制台"
+
+[dependencies]
+atlas-core.workspace = true
+atlas-parser.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
