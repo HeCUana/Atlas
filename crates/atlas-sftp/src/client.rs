@@ -543,6 +543,7 @@ mod tests {
             username: "mc".to_string(),
             password: Some("pw".to_string()),
             key_path: None,
+            key_passphrase: None,
             root: root.map(str::to_string),
         }
     }

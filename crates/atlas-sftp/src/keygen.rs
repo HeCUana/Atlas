@@ -9,16 +9,70 @@
 //! 而且公钥无论如何都要人工装到远端的 `authorized_keys`，跑不掉那一步。
 //! 因此这里提供**显式**的 `atlas keygen` 命令，由人来决定何时生成。
 //!
-//! ## 格式
+//! ## 格式与扩展名
 //!
-//! - 私钥：OpenSSH 格式（`-----BEGIN OPENSSH PRIVATE KEY-----`），
-//!   与 `ssh-keygen` 生成的互相兼容，Unix 下权限收紧为 `0600`；
-//! - 公钥：单行 `ssh-ed25519 AAAA... <comment>`，与 `authorized_keys` 的格式一致。
+//! `.pem` 是**容器编码**的名字，不是密钥类型。别被文件名带偏——
+//! 一个叫 `.pem` 的文件，内容未必是标准 PEM。
+//!
+//! | 格式 | 私钥内容 | 私钥文件名 | 公钥文件名 |
+//! | --- | --- | --- | --- |
+//! | [`KeyFormat::OpenSsh`] | `-----BEGIN OPENSSH PRIVATE KEY-----` | `id_ed25519` | `id_ed25519.pub` |
+//! | [`KeyFormat::Pkcs8`] | `-----BEGIN PRIVATE KEY-----` | `id_ed25519.pem` | `id_ed25519.pub` |
+//!
+//! 公钥文件名与私钥格式无关（公钥内容本来就是单一格式），始终是 `<名字>.pub`。
+//!
+//! **默认是 OpenSSH 格式**，因为那是 `ssh-keygen` 的默认产物，也是
+//! `ssh` / `scp` / `sftp` / `~/.ssh/config` 的 `IdentityFile` 全都认的约定。
+//! 把 OpenSSH 格式的文件叫 `.pem` 反而是误导——它的内容不是标准 PEM。
+//!
+//! 需要标准 PKCS#8 PEM（部分工具只认这个）时用 `--format pkcs8`；
+//! 该格式还支持用口令加密（`--passphrase`），
+//! 而 OpenSSH 格式的加密在当前实现里**不支持**。
 
 use std::path::{Path, PathBuf};
 
 use atlas_core::{AtlasError, Result};
 use russh::keys::ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
+
+/// 私钥的编码格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyFormat {
+    /// OpenSSH 格式（`-----BEGIN OPENSSH PRIVATE KEY-----`）。
+    ///
+    /// `ssh-keygen` 的默认产物，与 SSH 工具链的兼容性最好。
+    OpenSsh,
+    /// 标准 PKCS#8 PEM（`-----BEGIN PRIVATE KEY-----`）。
+    ///
+    /// 部分只认 PEM 的工具需要这个；支持用口令加密。
+    Pkcs8,
+}
+
+impl KeyFormat {
+    /// 从文本解析格式名。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "openssh" | "ssh" => Some(Self::OpenSsh),
+            "pkcs8" | "pem" => Some(Self::Pkcs8),
+            _ => None,
+        }
+    }
+
+    /// 格式名。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OpenSsh => "openssh",
+            Self::Pkcs8 => "pkcs8",
+        }
+    }
+
+    /// 该格式下的默认私钥文件名。
+    pub fn default_file_name(&self) -> &'static str {
+        match self {
+            Self::OpenSsh => "id_ed25519",
+            Self::Pkcs8 => "id_ed25519.pem",
+        }
+    }
+}
 
 /// 生成的密钥对。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,23 +85,49 @@ pub struct KeyPair {
     pub public_key: String,
     /// 指纹（`SHA256:...`）。
     pub fingerprint: String,
+    /// 私钥的编码格式。
+    pub format: KeyFormat,
+    /// 私钥是否已用口令加密。
+    pub encrypted: bool,
 }
 
-/// 生成 Ed25519 密钥对。
+/// 生成 Ed25519 密钥对（OpenSSH 格式，不加密）。
 ///
-/// - 已存在的私钥**不会被覆盖**，除非 `force` 为真——覆盖等于销毁旧凭据；
-/// - 私钥目录会自动创建；
-/// - `comment` 会附加到公钥末尾，便于在 `authorized_keys` 里辨认来源。
+/// 便捷入口，等价于 [`generate_ed25519_with`] 加上
+/// [`KeyFormat::OpenSsh`] 与 `None` 口令。
 pub fn generate_ed25519(
     private_path: &Path,
     comment: Option<&str>,
     force: bool,
+) -> Result<KeyPair> {
+    generate_ed25519_with(private_path, comment, force, KeyFormat::OpenSsh, None)
+}
+
+/// 生成 Ed25519 密钥对，可指定格式与口令。
+///
+/// - 已存在的私钥**不会被覆盖**，除非 `force` 为真——覆盖等于销毁旧凭据；
+/// - 私钥目录会自动创建；
+/// - `comment` 会附加到公钥末尾，便于在 `authorized_keys` 里辨认来源；
+/// - `passphrase` 仅在 [`KeyFormat::Pkcs8`] 下受支持：OpenSSH 新格式的
+///   加密编码在当前依赖里没有实现，硬造一个只会给出不可用的文件。
+pub fn generate_ed25519_with(
+    private_path: &Path,
+    comment: Option<&str>,
+    force: bool,
+    format: KeyFormat,
+    passphrase: Option<&str>,
 ) -> Result<KeyPair> {
     if private_path.exists() && !force {
         return Err(AtlasError::Sftp(format!(
             "私钥已存在: {}（如需覆盖请显式使用 --force）",
             private_path.display()
         )));
+    }
+
+    if passphrase.is_some() && format == KeyFormat::OpenSsh {
+        return Err(AtlasError::Sftp(
+            "OpenSSH 格式暂不支持口令加密，请改用 --format pkcs8".into(),
+        ));
     }
 
     // `ssh_key::PrivateKey::random` 要求 `CryptoRng`。
@@ -57,9 +137,8 @@ pub fn generate_ed25519(
     let private = PrivateKey::random(&mut rng, Algorithm::Ed25519)
         .map_err(|e| AtlasError::Sftp(format!("生成 Ed25519 密钥失败: {e}")))?;
 
-    let private_pem = private
-        .to_openssh(LineEnding::LF)
-        .map_err(|e| AtlasError::Sftp(format!("序列化私钥失败: {e}")))?;
+    let private_pem = serialize_private_key(&private, format, passphrase)?;
+    let encrypted = passphrase.is_some();
 
     let mut public_key = private
         .public_key()
@@ -92,10 +171,50 @@ pub fn generate_ed25519(
         public_path,
         public_key,
         fingerprint,
+        format,
+        encrypted,
     })
 }
 
-/// 私钥对应的公钥路径：同目录下的 `<stem>.pub`。
+/// 加密私钥时使用的 PBKDF2-SHA256 迭代次数。
+///
+/// OpenSSH 的历史默认值只有 16——那是 2010 年代的产物，对今天的算力毫无意义。
+/// 这里取 OWASP 对 PBKDF2-HMAC-SHA256 的推荐值（600,000）。
+const PBKDF2_ROUNDS: u32 = 600_000;
+
+/// 按目标格式序列化私钥。
+fn serialize_private_key(
+    private: &PrivateKey,
+    format: KeyFormat,
+    passphrase: Option<&str>,
+) -> Result<String> {
+    match format {
+        KeyFormat::OpenSsh => private
+            .to_openssh(LineEnding::LF)
+            .map(|s| s.to_string())
+            .map_err(|e| AtlasError::Sftp(format!("序列化私钥失败: {e}"))),
+        KeyFormat::Pkcs8 => {
+            let mut buf: Vec<u8> = Vec::new();
+            let result = match passphrase {
+                Some(pass) => russh::keys::encode_pkcs8_pem_encrypted(
+                    private,
+                    pass.as_bytes(),
+                    PBKDF2_ROUNDS,
+                    &mut buf,
+                ),
+                None => russh::keys::encode_pkcs8_pem(private, &mut buf),
+            };
+            result.map_err(|e| AtlasError::Sftp(format!("序列化私钥失败: {e}")))?;
+            String::from_utf8(buf)
+                .map_err(|e| AtlasError::Sftp(format!("私钥内容不是合法 UTF-8: {e}")))
+        }
+    }
+}
+
+/// 私钥对应的公钥路径：同目录下的 `<名字>.pub`。
+///
+/// 扩展名是**替换**而非追加，所以 `id_ed25519.pem` 对应 `id_ed25519.pub`——
+/// 公钥文件名与私钥的编码格式无关。
 pub fn public_path_of(private_path: &Path) -> PathBuf {
     private_path.with_extension("pub")
 }

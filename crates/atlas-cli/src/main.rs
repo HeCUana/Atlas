@@ -92,9 +92,15 @@ enum Commands {
     },
     /// 生成 SSH 客户端密钥对（用于 SFTP / 远程连接）。
     Keygen {
-        /// 私钥输出路径。
-        #[arg(long, default_value = AtlasConfig::DEFAULT_KEY_PATH)]
-        path: PathBuf,
+        /// 私钥输出路径（默认按格式取 keys/id_ed25519 或 keys/id_ed25519.pem）。
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// 私钥格式：openssh（默认，ssh-keygen 产物）或 pkcs8（标准 PEM）。
+        #[arg(long, default_value = "openssh")]
+        format: String,
+        /// 私钥口令（仅 pkcs8 格式支持加密）。
+        #[arg(long)]
+        passphrase: Option<String>,
         /// 覆盖已存在的私钥（会销毁旧凭据）。
         #[arg(long)]
         force: bool,
@@ -341,14 +347,36 @@ async fn async_run(cli: Cli) -> Result<()> {
         }
         Commands::Keygen {
             path,
+            format,
+            passphrase,
             force,
             comment,
         } => {
-            let pair = atlas_sftp::generate_ed25519(&path, Some(&comment), force)?;
+            let format = atlas_sftp::KeyFormat::parse(&format).ok_or_else(|| {
+                anyhow::anyhow!("未知的私钥格式: {format}（可选 openssh / pkcs8）")
+            })?;
+            let path = path.unwrap_or_else(|| {
+                PathBuf::from(match format {
+                    atlas_sftp::KeyFormat::Pkcs8 => AtlasConfig::DEFAULT_KEY_PATH_PKCS8,
+                    atlas_sftp::KeyFormat::OpenSsh => AtlasConfig::DEFAULT_KEY_PATH,
+                })
+            });
+
+            let pair = atlas_sftp::generate_ed25519_with(
+                &path,
+                Some(&comment),
+                force,
+                format,
+                passphrase.as_deref(),
+            )?;
             println!("已生成 SSH 客户端密钥对：");
             println!("  私钥: {}", pair.private_path.display());
             println!("  公钥: {}", pair.public_path.display());
+            println!("  格式: {}", pair.format.as_str());
             println!("  指纹: {}", pair.fingerprint);
+            if pair.encrypted {
+                println!("  加密: 是（连接时需在 [sftp] 段填写 key_passphrase）");
+            }
             println!();
             println!("下一步：把下面这行公钥追加到远端服务器的 ~/.ssh/authorized_keys：");
             println!("  {}", pair.public_key);

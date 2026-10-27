@@ -5,8 +5,11 @@
 //! - 从私钥推导出的公钥必须与写出的 `.pub` 文件一致；
 //! - 已存在的私钥不能被静默覆盖（覆盖 = 销毁旧凭据）。
 
-use atlas_sftp::keygen::{generate_ed25519, public_path_of};
+use atlas_sftp::KeyFormat;
+use atlas_sftp::keygen::{generate_ed25519, generate_ed25519_with, public_path_of};
 use russh::keys::decode_secret_key;
+
+const PASSPHRASE: &str = "correct-horse-battery-staple";
 
 #[test]
 fn 生成的密钥对可用且公私钥匹配() {
@@ -119,4 +122,108 @@ fn 公钥路径规则是同目录换扩展名() {
         public_path_of(std::path::Path::new("keys/id_ed25519")),
         std::path::PathBuf::from("keys/id_ed25519.pub")
     );
+    // 公钥文件名与私钥格式无关：`with_extension` 是**替换**扩展名，
+    // 所以 `id_ed25519.pem` 的公钥仍是 `id_ed25519.pub`。
+    assert_eq!(
+        public_path_of(std::path::Path::new("keys/id_ed25519.pem")),
+        std::path::PathBuf::from("keys/id_ed25519.pub")
+    );
+}
+
+// ------------------------------------------------------------------ 格式
+
+#[test]
+fn pkcs8_格式产出标准_pem_私钥() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519.pem");
+
+    let pair = generate_ed25519_with(&private_path, None, false, KeyFormat::Pkcs8, None)
+        .expect("生成应成功");
+
+    assert_eq!(pair.format, KeyFormat::Pkcs8);
+    assert!(!pair.encrypted);
+
+    let pem = std::fs::read_to_string(&pair.private_path).expect("读取私钥失败");
+    assert!(
+        pem.starts_with("-----BEGIN PRIVATE KEY-----"),
+        "PKCS#8 应是标准 PEM 头，实际：{}",
+        pem.lines().next().unwrap_or_default()
+    );
+
+    // 仍须能被解析回来。
+    let parsed = decode_secret_key(&pem, None).expect("PKCS#8 私钥应能被解析");
+    assert_eq!(
+        parsed.public_key().to_openssh().expect("导出公钥失败"),
+        pair.public_key
+    );
+}
+
+#[test]
+fn pkcs8_加口令后能被口令解开且公钥一致() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519.pem");
+
+    let pair = generate_ed25519_with(
+        &private_path,
+        Some("atlas-test"),
+        false,
+        KeyFormat::Pkcs8,
+        Some(PASSPHRASE),
+    )
+    .expect("生成应成功");
+
+    assert!(pair.encrypted, "应标记为已加密");
+
+    let pem = std::fs::read_to_string(&pair.private_path).expect("读取私钥失败");
+    assert!(
+        pem.starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+        "加密私钥应有 ENCRYPTED 头"
+    );
+    assert!(!pem.contains(PASSPHRASE), "私钥文件里不得出现明文口令");
+
+    // 用正确口令能解开，且公钥一致。
+    let parsed = decode_secret_key(&pem, Some(PASSPHRASE)).expect("正确口令应能解开私钥");
+    assert_eq!(
+        parsed.public_key().to_openssh().expect("导出公钥失败"),
+        pair.public_key.trim_end_matches(" atlas-test")
+    );
+
+    // 用错误口令必须失败。
+    assert!(
+        decode_secret_key(&pem, Some("wrong-passphrase")).is_err(),
+        "错误口令必须解析失败"
+    );
+}
+
+#[test]
+fn openssh_格式不支持口令加密() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let err = generate_ed25519_with(
+        &dir.path().join("id_ed25519"),
+        None,
+        false,
+        KeyFormat::OpenSsh,
+        Some(PASSPHRASE),
+    )
+    .expect_err("OpenSSH 格式应拒绝口令");
+    assert!(
+        err.to_string().contains("pkcs8"),
+        "错误信息应指向 pkcs8，实际：{err}"
+    );
+    assert!(
+        !dir.path().join("id_ed25519").exists(),
+        "失败的生成不得留下私钥文件"
+    );
+}
+
+#[test]
+fn 格式名可解析且默认文件名不同() {
+    assert_eq!(KeyFormat::parse("openssh"), Some(KeyFormat::OpenSsh));
+    assert_eq!(KeyFormat::parse("OpenSSH"), Some(KeyFormat::OpenSsh));
+    assert_eq!(KeyFormat::parse("pkcs8"), Some(KeyFormat::Pkcs8));
+    assert_eq!(KeyFormat::parse("pem"), Some(KeyFormat::Pkcs8));
+    assert_eq!(KeyFormat::parse("不存在的格式"), None);
+
+    assert_eq!(KeyFormat::OpenSsh.default_file_name(), "id_ed25519");
+    assert_eq!(KeyFormat::Pkcs8.default_file_name(), "id_ed25519.pem");
 }

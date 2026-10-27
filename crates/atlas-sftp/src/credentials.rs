@@ -84,8 +84,8 @@ impl SftpCredentials {
     /// 私钥按 [`SftpConfig::key_path`] 指向的文件读入内存；
     /// 读文件失败时返回 [`AtlasError::Sftp`]（错误信息只含路径，不含私钥内容）。
     ///
-    /// [`SftpConfig`] 没有私钥口令字段，需要加密私钥时请自行调用
-    /// [`SftpCredentials::with_passphrase`] 补上。
+    /// 私钥口令取自 [`SftpConfig::key_passphrase`]——用 `atlas keygen
+    /// --format pkcs8 --passphrase ...` 生成的加密私钥需要它。
     pub fn from_config(config: &SftpConfig) -> Result<Self> {
         let private_key = match &config.key_path {
             Some(path) => Some(read_private_key(path)?),
@@ -96,7 +96,7 @@ impl SftpCredentials {
             username: config.username.clone(),
             password: config.password.clone(),
             private_key,
-            passphrase: None,
+            passphrase: config.key_passphrase.clone(),
         })
     }
 
@@ -194,6 +194,7 @@ mod tests {
             username: "mc".to_string(),
             password: Some(SECRET_PASSWORD.to_string()),
             key_path: Some(key_path.clone()),
+            key_passphrase: None,
             root: None,
         };
 
@@ -217,6 +218,7 @@ mod tests {
             username: "mc".to_string(),
             password: None,
             key_path: Some(std::path::PathBuf::from("definitely-missing-key")),
+            key_passphrase: None,
             root: None,
         };
 

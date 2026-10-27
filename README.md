@@ -123,6 +123,7 @@ $ atlas keygen
 已生成 SSH 客户端密钥对：
   私钥: keys/id_ed25519
   公钥: keys/id_ed25519.pub
+  格式: openssh
   指纹: SHA256:kJA+fxo6/RpZE7iILwkzH4blLCRWqL7yT8N/AmTzGdg
 
 下一步：把下面这行公钥追加到远端服务器的 ~/.ssh/authorized_keys：
@@ -132,9 +133,32 @@ $ atlas keygen
   key_path = "keys/id_ed25519"
 ```
 
-**为什么不自动生成**：私钥是凭据，生成它属于安全敏感动作，不该在启动时悄悄发生；而且公钥无论如何都要人工装到远端的 `authorized_keys`，跑不掉那一步。所以这里是**显式命令**，由你决定何时生成。
+#### 为什么默认没有 `.pem`
 
-- 私钥为 OpenSSH 格式，与 `ssh-keygen` 生成的互相兼容；Unix 下权限收紧为 `0600`。
+`.pem` 是**容器编码**的名字，不是密钥类型。别被文件名带偏——一个叫 `.pem` 的文件，内容未必是标准 PEM。
+
+| 格式 | 私钥内容 | 私钥文件名 | 公钥文件名 | 加密 |
+| --- | --- | --- | --- | --- |
+| `openssh`（默认） | `-----BEGIN OPENSSH PRIVATE KEY-----` | `keys/id_ed25519` | `keys/id_ed25519.pub` | 不支持 |
+| `pkcs8` | `-----BEGIN PRIVATE KEY-----` | `keys/id_ed25519.pem` | `keys/id_ed25519.pub` | 支持 |
+
+公钥文件名与私钥格式无关（公钥内容本来就是单一格式），始终是 `<名字>.pub`。
+
+**默认选 OpenSSH 格式**：那是 `ssh-keygen` 的默认产物，也是 `ssh` / `scp` / `sftp` / `~/.ssh/config` 的 `IdentityFile` 全都认的约定。把 OpenSSH 格式的文件叫 `.pem` 反而误导——它的内容不是标准 PEM。
+
+需要标准 PKCS#8 PEM（部分工具只认这个）时：
+
+```console
+$ atlas keygen --format pkcs8                          # keys/id_ed25519.pem
+$ atlas keygen --format pkcs8 --passphrase <口令>        # 加密私钥
+```
+
+加密私钥的 PBKDF2-SHA256 迭代次数取 **600,000**（OWASP 推荐值）——OpenSSH 的历史默认值只有 16，对今天的算力毫无意义。连接时把口令填进 `[sftp] key_passphrase`。
+
+#### 其余约定
+
+- **为什么不自动生成**：私钥是凭据，生成它属于安全敏感动作，不该在启动时悄悄发生；而且公钥无论如何都要人工装到远端的 `authorized_keys`，跑不掉那一步。所以这里是**显式命令**，由你决定何时生成。
+- 私钥为 OpenSSH 格式时与 `ssh-keygen` 生成的互相兼容；Unix 下权限收紧为 `0600`。
 - **Windows 上没有 POSIX 权限位**，私钥文件继承所在目录的 ACL——请确认 `keys/` 目录只对本人可写。
 - 已存在的私钥**不会被覆盖**（覆盖 = 销毁旧凭据），需要覆盖请显式加 `--force`。
 - `atlas init` 会创建 `keys/` 目录；配置里若填了 `[sftp] key_path`，其父目录也会被自动补建。
@@ -635,7 +659,7 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | 终端命令返回信息的采集语义 | 基于日志行的**启发式提取**，带超时窗口；窗口内无输出返回 `None`，有输出返回 `Some(文本)`。结果不保证完整或权威 |
 | `ConsoleBridge` 的可测试性 | 抽取 `ConsoleSource` trait，`ManagedServer` 实现之，采集逻辑可用 mock 单测 |
 | 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、`keys/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`） |
-| SSH 客户端密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装到远端 `authorized_keys` |
+| SSH 客户端密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装到远端 `authorized_keys`。需要标准 PKCS#8 PEM 用 `--format pkcs8`（该格式支持 `--passphrase` 加密，PBKDF2-SHA256 迭代 600,000 次） |
 
 ### 12.2 仍待决策
 

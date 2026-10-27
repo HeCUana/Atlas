@@ -126,6 +126,7 @@ fn sftp_私钥所在目录属于必需目录() {
             username: "mc".into(),
             password: None,
             key_path: Some(PathBuf::from("keys/id_ed25519")),
+            key_passphrase: None,
             root: None,
         }),
         ..Default::default()
@@ -146,6 +147,7 @@ fn sftp_私钥在绝对路径时取其父目录() {
             username: "mc".into(),
             password: None,
             key_path: Some(PathBuf::from("/etc/atlas/keys/id_ed25519")),
+            key_passphrase: None,
             root: None,
         }),
         ..Default::default()

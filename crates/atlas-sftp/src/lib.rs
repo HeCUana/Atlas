@@ -30,5 +30,5 @@ pub mod path;
 pub use client::{RemoteEntry, SftpClient, SftpConnectOptions};
 pub use credentials::SftpCredentials;
 pub use hostkey::{HostKeyDecision, KnownHostEntry, UnknownHostPolicy};
-pub use keygen::{KeyPair, generate_ed25519};
+pub use keygen::{KeyFormat, KeyPair, generate_ed25519, generate_ed25519_with};
 pub use path::{human_size, is_hidden, join_remote, normalize_remote, sanitize_local_path};

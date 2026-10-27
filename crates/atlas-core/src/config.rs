@@ -101,7 +101,7 @@ impl Default for DataSource {
 /// `password` 是敏感字段。**不要**为此类型派生 `Debug`——
 /// `Debug` 实现是手写的，口令一律渲染为 `***`，私钥路径保留（路径本身不是机密，
 /// 但若不希望暴露请在调用侧自行处理）。
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SftpConfig {
     /// 主机地址。
     pub host: String,
@@ -116,6 +116,9 @@ pub struct SftpConfig {
     /// 私钥路径。
     #[serde(default)]
     pub key_path: Option<PathBuf>,
+    /// 私钥口令（私钥被加密时才需要）。
+    #[serde(default)]
+    pub key_passphrase: Option<String>,
     /// 远程根目录（SFTP chroot 之外的起始目录）。
     #[serde(default)]
     pub root: Option<String>,
@@ -132,6 +135,10 @@ impl std::fmt::Debug for SftpConfig {
                 &self.password.as_ref().map(|_| "***".to_owned()),
             )
             .field("key_path", &self.key_path)
+            .field(
+                "key_passphrase",
+                &self.key_passphrase.as_ref().map(|_| "***".to_owned()),
+            )
             .field("root", &self.root)
             .finish()
     }
@@ -240,6 +247,9 @@ impl AtlasConfig {
     /// 默认的 **SSH 客户端私钥路径**（相对工作目录）。
     pub const DEFAULT_KEY_PATH: &'static str = "keys/id_ed25519";
 
+    /// 默认的 **PKCS#8 PEM 私钥路径**（相对工作目录）。
+    pub const DEFAULT_KEY_PATH_PKCS8: &'static str = "keys/id_ed25519.pem";
+
     /// 返回运行期**必须存在**的目录。
     ///
     /// 包含：
@@ -343,6 +353,7 @@ impl AtlasConfig {
              # port = 22\n\
              # username = \"atlas\"\n\
              # key_path = \"keys/id_ed25519\"\n\
+             # key_passphrase = \"\"     # 私钥被加密时才需要\n\
              # root = \"/home/mc\"\n",
         );
         out
