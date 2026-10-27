@@ -445,6 +445,25 @@ impl SftpClient {
         Ok(())
     }
 
+    /// 删除远程**目录**。
+    ///
+    /// SFTP 协议把「删文件」与「删目录」分成两个操作（`SSH_FXP_REMOVE` /
+    /// `SSH_FXP_RMDIR`），用 [`Self::remove`] 删目录会得到 "Permission denied"。
+    ///
+    /// 目录必须为空——SFTP 协议没有"递归删除"操作。
+    ///
+    /// # 错误
+    ///
+    /// 路径非法、远端删除失败或目录非空时返回 [`AtlasError::Sftp`]。
+    pub async fn remove_dir(&self, path: &str) -> Result<()> {
+        let target = self.resolve(path)?;
+        self.session
+            .remove_dir(target.clone())
+            .await
+            .map_err(|e| AtlasError::Sftp(format!("删除远程目录 {target} 失败: {e}")))?;
+        Ok(())
+    }
+
     /// 创建远程目录。
     ///
     /// 只创建单层目录，父目录不存在时会失败（不递归创建）。

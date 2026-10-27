@@ -32,6 +32,7 @@ use atlas_server::{ConsoleBridge, Supervisor};
 use clap::{Parser, Subcommand};
 
 mod scaffold;
+mod sftp_session;
 
 #[derive(Parser, Debug)]
 #[command(name = "atlas", version, about = "Atlas — Minecraft 多服务器管理工具")]
@@ -109,9 +110,11 @@ enum Commands {
         comment: String,
     },
     /// 远程文件管理（SFTP）。
+    ///
+    /// 不带子命令时进入**交互式会话**（逐条执行），带子命令时一次性执行。
     Sftp {
         #[command(subcommand)]
-        action: SftpAction,
+        action: Option<SftpAction>,
         /// 接受未知主机密钥（首次连接新主机时用；会记录审计日志）。
         #[arg(long)]
         accept_unknown_host: bool,
@@ -149,6 +152,11 @@ enum SftpAction {
     },
     /// 删除远端文件。
     Rm {
+        /// 远端路径。
+        path: String,
+    },
+    /// 删除远端目录（必须为空）。
+    Rmdir {
         /// 远端路径。
         path: String,
     },
@@ -513,7 +521,7 @@ async fn async_run(cli: Cli) -> Result<()> {
             };
 
             match action {
-                SftpAction::Ls { path } => {
+                Some(SftpAction::Ls { path }) => {
                     let entries = client.list(&path).await?;
                     if entries.is_empty() {
                         println!("（空目录）");
@@ -525,7 +533,7 @@ async fn async_run(cli: Cli) -> Result<()> {
                         }
                     }
                 }
-                SftpAction::Stat { path } => {
+                Some(SftpAction::Stat { path }) => {
                     let entry = client.stat(&path).await?;
                     println!("路径: {}", entry.path);
                     println!("类型: {}", if entry.is_dir { "目录" } else { "文件" });
@@ -534,21 +542,33 @@ async fn async_run(cli: Cli) -> Result<()> {
                         println!("修改时间: {m}");
                     }
                 }
-                SftpAction::Put { local, remote } => {
+                Some(SftpAction::Put { local, remote }) => {
                     client.upload(&local, &remote).await?;
                     println!("已上传 {} → {remote}", local.display());
                 }
-                SftpAction::Get { remote, local } => {
+                Some(SftpAction::Get { remote, local }) => {
                     client.download(&remote, &local).await?;
                     println!("已下载 {remote} → {}", local.display());
                 }
-                SftpAction::Rm { path } => {
+                Some(SftpAction::Rm { path }) => {
                     client.remove(&path).await?;
                     println!("已删除 {path}");
                 }
-                SftpAction::Mkdir { path } => {
+                Some(SftpAction::Rmdir { path }) => {
+                    client.remove_dir(&path).await?;
+                    println!("已删除目录 {path}");
+                }
+                Some(SftpAction::Mkdir { path }) => {
                     client.mkdir(&path).await?;
                     println!("已创建目录 {path}");
+                }
+                // 不带子命令 → 进入交互式会话。
+                None => {
+                    let session = sftp_session::Session::new(
+                        client,
+                        sftp_config.root.clone().unwrap_or_default(),
+                    );
+                    sftp_session::run(session).await;
                 }
             }
         }

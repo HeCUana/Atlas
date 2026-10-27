@@ -166,14 +166,45 @@ $ atlas keygen --format pkcs8 --passphrase <口令>        # 加密私钥
 
 Atlas 通过 SFTP 管理所托管服务器中的文件。**Atlas 是 SFTP 客户端**——`host` 填的是**远端**服务器地址。
 
+**两种用法**：
+
+```console
+$ atlas sftp                      # 交互式会话（不带子命令）
+Atlas SFTP 交互会话 — 远端根目录: /
+输入 help 查看可用命令，quit 退出。
+sftp:/> ls /
+d            0  /C:
+d            0  /D:
+sftp:/> cd C:/Users/Administrator/Desktop
+sftp:/C:/Users/Administrator/Desktop> pwd
+远端当前目录: /C:/Users/Administrator/Desktop
+sftp:/C:/Users/Administrator/Desktop> quit
+已退出会话。
+```
+
+交互会话支持的命令：
+
+| 命令 | 说明 |
+| --- | --- |
+| `ls [路径]` | 列出远端目录（默认当前目录） |
+| `stat <路径>` | 查看远端文件/目录信息 |
+| `cd <路径>` / `pwd` | 切换 / 显示远端当前目录 |
+| `lcd <路径>` / `lpwd` | 切换 / 显示**本地**当前目录 |
+| `get <远端> [本地]` | 下载（省略本地名则用远端文件名） |
+| `put <本地> [远端]` | 上传（省略远端名则放进当前目录） |
+| `rm <远端>` / `rmdir <远端>` | 删除文件 / 删除目录（须为空） |
+| `!<命令>` | 执行本地 shell 命令 |
+| `help` / `quit` | 帮助 / 退出 |
+
+**一次性模式**（带子命令，便于脚本化）：
+
 ```console
 $ atlas sftp ls /
-d            4096  /plugins
--         1048576  /server.jar
 $ atlas sftp put ./config.toml /home/mc/config.toml
 $ atlas sftp get /home/mc/latest.log ./latest.log
 $ atlas sftp mkdir /home/mc/backups
 $ atlas sftp rm /home/mc/old.log
+$ atlas sftp rmdir /home/mc/old-backups
 ```
 
 先在 `atlas.toml` 里配好 `[sftp]` 段：
