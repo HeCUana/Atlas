@@ -104,6 +104,19 @@ atlas-cli  →  atlas-core
 - 异常退出时必须恢复终端状态（raw mode / alternate screen / 光标可见性）。
   使用 `ratatui::init()` / `ratatui::restore()`，或 `ratatui::run()`。
 
+### 4.7 SFTP 远程根目录
+
+- `[sftp] root` 决定会话的**起点**，同时也是**访问边界**：`..` 不能越出根。
+- 路径一律用 **SFTP 绝对 POSIX 形式**。Windows 路径要经 `to_absolute_remote`
+  转换（`C:\Users\...` → `/C:/Users/...`）——与 sshd 返回的路径形式一致。
+- 路径解析必须走 `resolve_under_root`：
+  - **绝对**输入必须落在根之下，否则报错；
+  - **相对**输入拼在根之下。
+  - 不要用「前导 `/` 一律忽略」的 chroot 语义——那会让「绝对路径」和
+    「相对路径」无法区分，用户输 `/etc/passwd` 时得到的不是他以为的结果。
+- `atlas-sftp` 不得依赖 `atlas-core`（见 §2.1），配置类型由 `atlas-core` 提供、
+  路径语义由 `atlas-sftp` 提供。
+
 ## 5. 测试要求
 
 - 每个 crate 至少要有单元测试；`atlas-parser`、`atlas-server` 必须有覆盖真实日志样本的测试。
