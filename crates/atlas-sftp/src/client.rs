@@ -545,6 +545,7 @@ mod tests {
             key_path: None,
             key_passphrase: None,
             root: root.map(str::to_string),
+            ..Default::default()
         }
     }
 

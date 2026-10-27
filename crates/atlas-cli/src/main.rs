@@ -108,6 +108,55 @@ enum Commands {
         #[arg(long, default_value = "atlas")]
         comment: String,
     },
+    /// 远程文件管理（SFTP）。
+    Sftp {
+        #[command(subcommand)]
+        action: SftpAction,
+        /// 接受未知主机密钥（首次连接新主机时用；会记录审计日志）。
+        #[arg(long)]
+        accept_unknown_host: bool,
+        /// 连接超时（秒）。
+        #[arg(long, default_value_t = 15)]
+        timeout: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SftpAction {
+    /// 列出远端目录。
+    Ls {
+        /// 远端路径。
+        path: String,
+    },
+    /// 查看远端文件或目录信息。
+    Stat {
+        /// 远端路径。
+        path: String,
+    },
+    /// 上传本地文件到远端。
+    Put {
+        /// 本地文件路径。
+        local: PathBuf,
+        /// 远端路径。
+        remote: String,
+    },
+    /// 下载远端文件到本地。
+    Get {
+        /// 远端路径。
+        remote: String,
+        /// 本地文件路径。
+        local: PathBuf,
+    },
+    /// 删除远端文件。
+    Rm {
+        /// 远端路径。
+        path: String,
+    },
+    /// 创建远端目录。
+    Mkdir {
+        /// 远端路径。
+        path: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -391,6 +440,117 @@ async fn async_run(cli: Cli) -> Result<()> {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default()
             );
+        }
+        Commands::Sftp {
+            action,
+            accept_unknown_host,
+            timeout,
+        } => {
+            let Some(sftp_config) = atlas.config.sftp.clone() else {
+                anyhow::bail!(
+                    "配置里没有 [sftp] 段。先运行 `atlas init`，然后编辑 {} 填入远端服务器地址。",
+                    cli.config.display()
+                );
+            };
+
+            let mut options = atlas_sftp::SftpConnectOptions::default();
+            if let Some(path) = &sftp_config.known_hosts_path {
+                options = atlas_sftp::SftpConnectOptions::with_known_hosts(path);
+            }
+            if accept_unknown_host || sftp_config.accept_unknown_host {
+                options = options.accept_unknown_host_approved_by("命令行或配置显式批准");
+            }
+
+            let client = match tokio::time::timeout(
+                Duration::from_secs(timeout),
+                atlas_sftp::SftpClient::connect_with_config(&sftp_config, &options),
+            )
+            .await
+            {
+                Ok(Ok(client)) => client,
+                Ok(Err(e)) => {
+                    // 只有"连不上"类错误才提示去查 SSH 服务；
+                    // 凭据/权限类错误提示这个方向会把人带偏。
+                    let message = e.to_string();
+                    let looks_like_connect_failure = [
+                        "refused",
+                        "拒绝",
+                        "timed out",
+                        "超时",
+                        "unreachable",
+                        "不可达",
+                        "连接失败",
+                        "无法连接",
+                    ]
+                    .iter()
+                    .any(|marker| {
+                        message
+                            .to_ascii_lowercase()
+                            .contains(&marker.to_ascii_lowercase())
+                    });
+
+                    if looks_like_connect_failure {
+                        anyhow::bail!(
+                            "连接 SFTP 服务器 {}:{} 失败：{message}\n\
+                             提示：确认该主机上 SSH 服务在监听（sshd 未启动 / 端口不对 / 被防火墙拦截）。",
+                            sftp_config.host,
+                            sftp_config.port
+                        );
+                    }
+                    anyhow::bail!(
+                        "连接 SFTP 服务器 {}:{} 失败：{message}",
+                        sftp_config.host,
+                        sftp_config.port
+                    );
+                }
+                Err(_) => {
+                    anyhow::bail!(
+                        "连接 SFTP 服务器 {}:{} 超时（{timeout} 秒）",
+                        sftp_config.host,
+                        sftp_config.port
+                    );
+                }
+            };
+
+            match action {
+                SftpAction::Ls { path } => {
+                    let entries = client.list(&path).await?;
+                    if entries.is_empty() {
+                        println!("（空目录）");
+                    } else {
+                        for entry in entries {
+                            let kind = if entry.is_dir { "d" } else { "-" };
+                            let size = if entry.is_dir { 0 } else { entry.size };
+                            println!("{kind} {size:>12}  {}", entry.path);
+                        }
+                    }
+                }
+                SftpAction::Stat { path } => {
+                    let entry = client.stat(&path).await?;
+                    println!("路径: {}", entry.path);
+                    println!("类型: {}", if entry.is_dir { "目录" } else { "文件" });
+                    println!("大小: {} 字节", entry.size);
+                    if let Some(m) = entry.modified {
+                        println!("修改时间: {m}");
+                    }
+                }
+                SftpAction::Put { local, remote } => {
+                    client.upload(&local, &remote).await?;
+                    println!("已上传 {} → {remote}", local.display());
+                }
+                SftpAction::Get { remote, local } => {
+                    client.download(&remote, &local).await?;
+                    println!("已下载 {remote} → {}", local.display());
+                }
+                SftpAction::Rm { path } => {
+                    client.remove(&path).await?;
+                    println!("已删除 {path}");
+                }
+                SftpAction::Mkdir { path } => {
+                    client.mkdir(&path).await?;
+                    println!("已创建目录 {path}");
+                }
+            }
         }
     }
 

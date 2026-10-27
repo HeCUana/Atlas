@@ -119,6 +119,16 @@ pub struct SftpConfig {
     /// 私钥口令（私钥被加密时才需要）。
     #[serde(default)]
     pub key_passphrase: Option<String>,
+    /// known_hosts 文件路径；`None` 时使用 `~/.ssh/known_hosts`。
+    #[serde(default)]
+    pub known_hosts_path: Option<PathBuf>,
+    /// 是否接受**未知主机**（首次连接）。
+    ///
+    /// 默认 `false`——主机密钥校验是防中间人攻击的关键，不该默认关闭。
+    /// 首次连接新主机时，要么先把主机公钥写进 known_hosts，
+    /// 要么显式开启此项（会记录审计日志）。
+    #[serde(default)]
+    pub accept_unknown_host: bool,
     /// 远程根目录（SFTP chroot 之外的起始目录）。
     #[serde(default)]
     pub root: Option<String>,
@@ -139,6 +149,8 @@ impl std::fmt::Debug for SftpConfig {
                 "key_passphrase",
                 &self.key_passphrase.as_ref().map(|_| "***".to_owned()),
             )
+            .field("known_hosts_path", &self.known_hosts_path)
+            .field("accept_unknown_host", &self.accept_unknown_host)
             .field("root", &self.root)
             .finish()
     }
@@ -348,12 +360,17 @@ impl AtlasConfig {
              \n\
              # ── SFTP 远程文件管理（可选） ────────────────────────────────\n\
              # 客户端私钥用 `atlas keygen` 生成（默认落在 keys/id_ed25519）。\n\
+             #\n\
+             # 注意：Atlas 是 SFTP **客户端**，host 填**远端**服务器地址，\n\
+             # 不是本机（本机没装 SSH 服务时连 127.0.0.1 必然 ECONNREFUSED）。\n\
              # [sftp]\n\
-             # host = \"127.0.0.1\"\n\
+             # host = \"192.168.1.10\"\n\
              # port = 22\n\
-             # username = \"atlas\"\n\
+             # username = \"mc\"\n\
              # key_path = \"keys/id_ed25519\"\n\
-             # key_passphrase = \"\"     # 私钥被加密时才需要\n\
+             # key_passphrase = \"\"       # 私钥被加密时才需要\n\
+             # known_hosts_path = \"\"     # 留空则用 ~/.ssh/known_hosts\n\
+             # accept_unknown_host = false # 首次连接新主机时才临时开启\n\
              # root = \"/home/mc\"\n",
         );
         out

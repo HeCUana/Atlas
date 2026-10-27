@@ -196,6 +196,7 @@ mod tests {
             key_path: Some(key_path.clone()),
             key_passphrase: None,
             root: None,
+            ..Default::default()
         };
 
         let creds = SftpCredentials::from_config(&config).expect("构造凭据失败");
@@ -220,6 +221,7 @@ mod tests {
             key_path: Some(std::path::PathBuf::from("definitely-missing-key")),
             key_passphrase: None,
             root: None,
+            ..Default::default()
         };
 
         let err = SftpCredentials::from_config(&config).expect_err("应当因缺少私钥文件而失败");

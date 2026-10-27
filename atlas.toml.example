@@ -42,9 +42,14 @@ plugin_dir = "plugins"
 # log_profiles = "log-profiles.toml"
 
 # SFTP 远程文件管理（可选）
+# 注意：Atlas 是 SFTP **客户端**，host 填**远端**服务器地址，不是本机。
+# 连 127.0.0.1 会得到 ECONNREFUSED —— 本机通常没有 SSH 服务在监听 22 端口。
 # [sftp]
-# host = "10.0.0.5"
+# host = "192.168.1.10"
 # port = 22
-# username = "atlas"
+# username = "mc"
 # key_path = "keys/id_ed25519"
+# key_passphrase = ""        # 私钥被加密时才需要
+# known_hosts_path = ""      # 留空则用 ~/.ssh/known_hosts
+# accept_unknown_host = false # 首次连接新主机时才临时开启
 # root = "/home/mc"

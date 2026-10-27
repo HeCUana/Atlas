@@ -128,6 +128,7 @@ fn sftp_私钥所在目录属于必需目录() {
             key_path: Some(PathBuf::from("keys/id_ed25519")),
             key_passphrase: None,
             root: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -149,6 +150,7 @@ fn sftp_私钥在绝对路径时取其父目录() {
             key_path: Some(PathBuf::from("/etc/atlas/keys/id_ed25519")),
             key_passphrase: None,
             root: None,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -161,4 +163,41 @@ fn 没有_sftp_配置时不引入密钥目录() {
     let config = AtlasConfig::default();
     let dirs = config.required_dirs();
     assert!(!dirs.contains(&PathBuf::from("keys")));
+}
+
+#[test]
+fn sftp_配置的口令与私钥口令都不进_debug() {
+    let config = atlas_core::SftpConfig {
+        host: "10.0.0.5".into(),
+        port: 22,
+        username: "mc".into(),
+        password: Some("super-secret-pw".into()),
+        key_path: Some(PathBuf::from("keys/id_ed25519")),
+        key_passphrase: Some("super-secret-passphrase".into()),
+        known_hosts_path: None,
+        accept_unknown_host: false,
+        root: None,
+    };
+    let rendered = format!("{config:?}");
+    assert!(
+        !rendered.contains("super-secret-pw"),
+        "口令泄漏: {rendered}"
+    );
+    assert!(
+        !rendered.contains("super-secret-passphrase"),
+        "私钥口令泄漏: {rendered}"
+    );
+    assert!(
+        rendered.contains("10.0.0.5"),
+        "非机密字段应保留: {rendered}"
+    );
+}
+
+#[test]
+fn 未知主机默认不自动接受() {
+    let config = atlas_core::SftpConfig::default();
+    assert!(
+        !config.accept_unknown_host,
+        "默认必须拒绝未知主机，否则主机密钥校验形同虚设"
+    );
 }

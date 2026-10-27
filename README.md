@@ -163,7 +163,46 @@ $ atlas keygen --format pkcs8 --passphrase <口令>        # 加密私钥
 - 已存在的私钥**不会被覆盖**（覆盖 = 销毁旧凭据），需要覆盖请显式加 `--force`。
 - `atlas init` 会创建 `keys/` 目录；配置里若填了 `[sftp] key_path`，其父目录也会被自动补建。
 
-### 2.4 运行方式
+### 2.4 远程文件管理（`atlas sftp`）
+
+Atlas 通过 SFTP 管理所托管服务器中的文件。**Atlas 是 SFTP 客户端**——`host` 填的是**远端**服务器地址。
+
+```console
+$ atlas sftp ls /
+d            4096  /plugins
+-         1048576  /server.jar
+$ atlas sftp put ./config.toml /home/mc/config.toml
+$ atlas sftp get /home/mc/latest.log ./latest.log
+$ atlas sftp mkdir /home/mc/backups
+$ atlas sftp rm /home/mc/old.log
+```
+
+先在 `atlas.toml` 里配好 `[sftp]` 段：
+
+```toml
+[sftp]
+host = "192.168.1.10"        # 远端服务器地址，不是本机
+port = 22
+username = "mc"
+key_path = "keys/id_ed25519" # `atlas keygen` 生成的私钥
+```
+
+**连不上时的排查顺序**（`ECONNREFUSED` / `os error 10061`）：
+
+1. `host` 填的是不是**远端**地址——填 `127.0.0.1` 就是连本机，本机没装 SSH 服务时必然被拒；
+2. 目标主机上 `sshd` 有没有在跑、`port` 对不对（`systemctl status sshd` / `netstat -ano | findstr :22`）；
+3. 中间有没有防火墙拦截。
+
+命令会在连接类失败时直接给出这条提示，不用自己猜：
+
+```
+Error: 连接 SFTP 服务器 127.0.0.1:22 失败：… 由于目标计算机积极拒绝，无法连接。 (os error 10061)
+提示：确认该主机上 SSH 服务在监听（sshd 未启动 / 端口不对 / 被防火墙拦截）。
+```
+
+**主机密钥校验默认开启**：未知主机一律拒绝（防中间人）。首次连新主机时，二选一——先把主机公钥写进 known_hosts，或临时用 `--accept-unknown-host`（会记录审计日志）。
+
+### 2.5 运行方式
 
 `atlas start` 是**前台守护模式**：启动目标服务器后接管它们，按 `[服务器ID] ` 前缀实时输出各服务器的控制台行。
 
@@ -660,6 +699,7 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | `ConsoleBridge` 的可测试性 | 抽取 `ConsoleSource` trait，`ManagedServer` 实现之，采集逻辑可用 mock 单测 |
 | 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、`keys/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`） |
 | SSH 客户端密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装到远端 `authorized_keys`。需要标准 PKCS#8 PEM 用 `--format pkcs8`（该格式支持 `--passphrase` 加密，PBKDF2-SHA256 迭代 600,000 次） |
+| SFTP 客户端的连接语义 | Atlas 是 **SFTP 客户端**，`[sftp] host` 填**远端**服务器地址。未知主机默认拒绝（防中间人），首次连接用 `--accept-unknown-host` 或先写入 known_hosts |
 
 ### 12.2 仍待决策
 
