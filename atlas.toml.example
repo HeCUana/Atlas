@@ -41,7 +41,26 @@ plugin_dir = "plugins"
 # 日志解析 profile 覆盖文件（可选）
 # log_profiles = "log-profiles.toml"
 
-# SFTP 远程文件管理（可选）
+# SFTP 服务端（可选）——Atlas 当服务端，让远端电脑用 SFTP 连进来管理上面的目录。
+# 客户端看到的是虚拟路径 /<服务器ID>/...，共享目录自动从上面的 [[servers]] 派生。
+# 启用步骤：
+#   1) atlas keygen --path keys/host_ed25519      # 服务端主机密钥
+#   2) 把远端电脑的客户端公钥写进 keys/authorized_keys（一行一个）
+#   3) 把下面的 enabled 改成 true
+[sftp_server]
+enabled = false
+listen = "0.0.0.0"
+port = 2222
+host_key = "keys/host_ed25519"
+authorized_keys = "keys/authorized_keys"
+
+# 额外的共享目录（[[servers]] 派生之外的补充）
+# [[sftp_server.share]]
+# name = "backups"
+# path = "D:/minecraft-backups"
+# read_only = true
+
+# SFTP 远程文件管理（可选）——Atlas 作为**客户端**连出去。
 # 注意：Atlas 是 SFTP **客户端**，host 填**远端**服务器地址，不是本机。
 # 连 127.0.0.1 会得到 ECONNREFUSED —— 本机通常没有 SSH 服务在监听 22 端口。
 # [sftp]

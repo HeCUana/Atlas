@@ -160,6 +160,81 @@ fn default_sftp_port() -> u16 {
     22
 }
 
+/// SFTP 服务端的一个共享目录。
+///
+/// 客户端看到的是**虚拟路径** `/<name>/...`，实际落在本机的 `path` 之下。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SftpShareConfig {
+    /// 虚拟路径名（客户端看到的目录名）。
+    pub name: String,
+    /// 真实目录（本机路径）。
+    pub path: PathBuf,
+    /// 是否只读——只读共享不接受写入、删除、改名与建目录。
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// SFTP 服务端配置。
+///
+/// Atlas 作为 **SFTP 服务端**运行：远端运维电脑用 SFTP 连到 Atlas，
+/// 看到的是 Atlas 所托管的各个服务器的目录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SftpServerConfig {
+    /// 是否启用 SFTP 服务端。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 监听地址。`0.0.0.0` 表示对外开放。
+    #[serde(default = "default_sftp_server_listen")]
+    pub listen: String,
+    /// 监听端口。
+    ///
+    /// 默认 **2222** 而不是 22——22 通常已经被本机的 OpenSSH 服务端占用，
+    /// 且用高位端口可以避免与系统 sshd 抢端口。
+    #[serde(default = "default_sftp_server_port")]
+    pub port: u16,
+    /// 主机私钥路径（OpenSSH 格式）。客户端首次连接时校验的就是这把钥匙。
+    #[serde(default = "default_sftp_server_host_key")]
+    pub host_key: PathBuf,
+    /// 允许登录的公钥文件（authorized_keys 格式，一行一个 `ssh-ed25519 ...`）。
+    #[serde(default = "default_sftp_server_authorized_keys")]
+    pub authorized_keys: PathBuf,
+    /// 额外的共享目录。
+    ///
+    /// 不填时**自动**从 `[[servers]]` 派生：每个服务器的 `id` 作为虚拟目录名，
+    /// `workdir` 作为真实目录。
+    #[serde(default)]
+    pub shares: Vec<SftpShareConfig>,
+}
+
+fn default_sftp_server_listen() -> String {
+    "0.0.0.0".to_owned()
+}
+
+fn default_sftp_server_port() -> u16 {
+    2222
+}
+
+fn default_sftp_server_host_key() -> PathBuf {
+    PathBuf::from("keys/host_ed25519")
+}
+
+fn default_sftp_server_authorized_keys() -> PathBuf {
+    PathBuf::from("keys/authorized_keys")
+}
+
+impl Default for SftpServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_sftp_server_listen(),
+            port: default_sftp_server_port(),
+            host_key: default_sftp_server_host_key(),
+            authorized_keys: default_sftp_server_authorized_keys(),
+            shares: Vec::new(),
+        }
+    }
+}
+
 /// Atlas 全局配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtlasConfig {
@@ -169,9 +244,12 @@ pub struct AtlasConfig {
     /// 数据源模式。
     #[serde(default)]
     pub data_source: DataSource,
-    /// SFTP 连接配置。
+    /// SFTP 连接配置（Atlas 作为**客户端**连出去）。
     #[serde(default)]
     pub sftp: Option<SftpConfig>,
+    /// SFTP 服务端配置（Atlas 作为**服务端**让别人连进来）。
+    #[serde(default)]
+    pub sftp_server: SftpServerConfig,
     /// 事件总线容量。
     #[serde(default = "default_event_capacity")]
     pub event_capacity: usize,
@@ -197,6 +275,7 @@ impl Default for AtlasConfig {
             servers: Vec::new(),
             data_source: DataSource::default(),
             sftp: None,
+            sftp_server: SftpServerConfig::default(),
             event_capacity: default_event_capacity(),
             plugin_dir: default_plugin_dir(),
             log_profiles: None,
@@ -357,6 +436,16 @@ impl AtlasConfig {
              # ── 日志解析 profile 覆盖（可选） ─────────────────────────────\n\
              # 覆盖内置的 Log4j2 / CraftBukkit 解析规则。\n\
              # log_profiles = \"log-profiles.toml\"\n\
+             \n\
+             # ── SFTP 服务端（可选） ─────────────────────────────────────\n\
+             # 启用后，远端电脑可以用 SFTP 连到 Atlas，管理上面这些服务器的目录。\n\
+             # 客户端看到的是虚拟路径 /<服务器ID>/... ，共享目录自动从 [[servers]] 派生。\n\
+             # [sftp_server]\n\
+             # enabled = true\n\
+             # listen = \"0.0.0.0\"\n\
+             # port = 2222\n\
+             # host_key = \"keys/host_ed25519\"        # `atlas keygen --path keys/host_ed25519`\n\
+             # authorized_keys = \"keys/authorized_keys\"  # 客户端的公钥，一行一个\n\
              \n\
              # ── SFTP 远程文件管理（可选） ────────────────────────────────\n\
              # 客户端私钥用 `atlas keygen` 生成（默认落在 keys/id_ed25519）。\n\
