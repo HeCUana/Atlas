@@ -227,3 +227,42 @@ fn 格式名可解析且默认文件名不同() {
     assert_eq!(KeyFormat::OpenSsh.default_file_name(), "id_ed25519");
     assert_eq!(KeyFormat::Pkcs8.default_file_name(), "id_ed25519.pem");
 }
+
+/// Windows 上私钥的 ACL 必须被收紧。
+///
+/// 否则会有两个问题：
+/// 1. 安全——私钥继承工作区目录的 ACL，同机其它账户可能可读；
+/// 2. 可用性——Windows 自带的 `ssh`/`scp` 见到过宽的 ACL 会直接拒绝使用该私钥
+///    （"UNPROTECTED PRIVATE KEY FILE"）。
+#[cfg(windows)]
+#[test]
+fn windows_下私钥_acl_被收紧到仅管理员与系统() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("keys").join("id_ed25519");
+
+    generate_ed25519(&private_path, None, false).expect("生成应成功");
+
+    let output = std::process::Command::new("icacls")
+        .arg(&private_path)
+        .output()
+        .expect("应能调用 icacls");
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    assert!(text.contains("SYSTEM"), "ACL 应保留 SYSTEM：\n{text}");
+    assert!(
+        text.contains("Administrators") || text.contains("-1-5-32-544"),
+        "ACL 应保留 Administrators：\n{text}"
+    );
+    assert!(
+        !text.contains("(I)"),
+        "不应残留继承自目录的权限项：\n{text}"
+    );
+    // 注意只能匹配**组名**，不能匹配整段输出——文件路径里本身就有 "Users"
+    // （C:\Users\...），整段匹配会误判。
+    assert!(
+        !text.contains("Everyone")
+            && !text.contains("BUILTIN\\Users")
+            && !text.contains("-1-5-32-545"),
+        "不应把私钥开放给普通用户：\n{text}"
+    );
+}

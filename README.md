@@ -158,8 +158,7 @@ $ atlas keygen --format pkcs8 --passphrase <口令>        # 加密私钥
 #### 其余约定
 
 - **为什么不自动生成**：私钥是凭据，生成它属于安全敏感动作，不该在启动时悄悄发生；而且公钥无论如何都要人工装到远端的 `authorized_keys`，跑不掉那一步。所以这里是**显式命令**，由你决定何时生成。
-- 私钥为 OpenSSH 格式时与 `ssh-keygen` 生成的互相兼容；Unix 下权限收紧为 `0600`。
-- **Windows 上没有 POSIX 权限位**，私钥文件继承所在目录的 ACL——请确认 `keys/` 目录只对本人可写。
+- 私钥为 OpenSSH 格式时与 `ssh-keygen` 生成的互相兼容；Unix 下权限收紧为 `0600`，**Windows 下自动用 `icacls` 把 ACL 收紧为「Administrators + SYSTEM」**——否则既不安全（同机其它账户可读），标准 `ssh`/`scp` 也会直接拒用该私钥（"UNPROTECTED PRIVATE KEY FILE"）。
 - 已存在的私钥**不会被覆盖**（覆盖 = 销毁旧凭据），需要覆盖请显式加 `--force`。
 - `atlas init` 会创建 `keys/` 目录；配置里若填了 `[sftp] key_path`，其父目录也会被自动补建。
 
@@ -201,6 +200,53 @@ Error: 连接 SFTP 服务器 127.0.0.1:22 失败：… 由于目标计算机积�
 ```
 
 **主机密钥校验默认开启**：未知主机一律拒绝（防中间人）。首次连新主机时，二选一——先把主机公钥写进 known_hosts，或临时用 `--accept-unknown-host`（会记录审计日志）。
+
+#### 服务端：目标主机上要先有 SSH 服务
+
+`ECONNREFUSED` / `os error 10061` 的含义是**目标端口上没人接受连接**——不是认证失败，也不是超时。对应到 Atlas：
+
+| 场景 | 要做的事 |
+| --- | --- |
+| 连的是**远端** MC 服务器 | 在那台机器上装并启动 SSH 服务（Linux：`apt install openssh-server` / `dnf install openssh-server` → `systemctl enable --now sshd`） |
+| 连的是**本机**（Windows） | 装 OpenSSH Server：`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0` → `Start-Service sshd` → `Set-Service sshd -StartupType Automatic` → 放行防火墙 `New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22` |
+| 连的是**本机**（Linux） | `apt install openssh-server && systemctl enable --now sshd` |
+
+#### Windows 服务端的公钥放哪
+
+Windows OpenSSH 对**管理员账户**有专门规则（`sshd_config` 里的 `Match Group administrators`）——公钥不放 `~/.ssh/authorized_keys`，而是放：
+
+```
+C:\ProgramData\ssh\administrators_authorized_keys
+```
+
+并且 ACL 必须收紧到只有 Administrators 与 SYSTEM（否则 sshd 会拒绝加载）：
+
+```powershell
+icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r
+icacls "C:\ProgramData\ssh\administrators_authorized_keys" /grant '*S-1-5-32-544:F' '*S-1-5-18:F'
+```
+
+用 SID 而不是组名，是为了在非英文 Windows 上也能跑通。
+
+#### 客户端私钥的 ACL 也要收紧
+
+同一类问题在**客户端侧**同样存在：私钥默认继承所在目录的 ACL，Windows 自带的 `ssh`/`scp` 见到过宽的 ACL 会**直接拒绝使用该私钥**：
+
+```
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@         WARNING: UNPROTECTED PRIVATE KEY FILE!         @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+Permissions for 'keys\id_ed25519' are too open.
+```
+
+`atlas keygen` 现在**自动**把私钥及其所在目录的 ACL 收紧为「Administrators + SYSTEM」（Windows 下用 `icacls`，Unix 下设为 `0600`）。如果私钥是别处生成的，手动执行：
+
+```powershell
+icacls "keys\id_ed25519" /inheritance:r
+icacls "keys\id_ed25519" /grant '*S-1-5-32-544:F' '*S-1-5-18:F'
+icacls "keys" /inheritance:r
+icacls "keys" /grant '*S-1-5-32-544:F' '*S-1-5-18:F'
+```
 
 ### 2.5 运行方式
 
@@ -700,6 +746,8 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、`keys/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`） |
 | SSH 客户端密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装到远端 `authorized_keys`。需要标准 PKCS#8 PEM 用 `--format pkcs8`（该格式支持 `--passphrase` 加密，PBKDF2-SHA256 迭代 600,000 次） |
 | SFTP 客户端的连接语义 | Atlas 是 **SFTP 客户端**，`[sftp] host` 填**远端**服务器地址。未知主机默认拒绝（防中间人），首次连接用 `--accept-unknown-host` 或先写入 known_hosts |
+| 客户端私钥的 ACL | `atlas keygen` 自动收紧：Unix `0600`，Windows `icacls` 收紧为「Administrators + SYSTEM」。不收紧的话 Windows 自带 `ssh`/`scp` 会以 "UNPROTECTED PRIVATE KEY FILE" 拒用该私钥 |
+| Windows 服务端的公钥位置 | 管理员账户走 `C:\ProgramData\ssh\administrators_authorized_keys`（`sshd_config` 的 `Match Group administrators` 规则），且 ACL 须收紧到仅 Administrators + SYSTEM |
 
 ### 12.2 仍待决策
 

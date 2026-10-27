@@ -162,6 +162,8 @@ pub fn generate_ed25519_with(
     }
 
     write_private_key(private_path, private_pem.as_bytes())?;
+    // Windows 上私钥默认继承目录 ACL —— 既不安全，也让标准 ssh/scp 拒用。
+    harden_windows_acl(private_path);
 
     let public_path = public_path_of(private_path);
     std::fs::write(&public_path, format!("{public_key}\n"))?;
@@ -222,8 +224,10 @@ pub fn public_path_of(private_path: &Path) -> PathBuf {
 /// 写入私钥，并把权限收紧。
 ///
 /// Unix 下显式设为 `0600`（私钥被同机其它用户读到就等于凭据泄漏）；
-/// Windows 没有 POSIX 权限位，文件继承所在目录的 ACL——
-/// 因此 Windows 上更需要保证 `keys/` 目录本身只对本人可写。
+/// Windows 上没有 POSIX 权限位，文件默认**继承所在目录的 ACL**——
+/// 这既不安全（同机其它账户可能可读），也会让 Windows 自带的
+/// `ssh`/`scp` 客户端**直接拒绝使用该私钥**（"UNPROTECTED PRIVATE KEY FILE"）。
+/// 因此 Windows 下用 `icacls` 把 ACL 显式收紧为「Administrators + SYSTEM」。
 fn write_private_key(path: &Path, content: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
@@ -250,3 +254,45 @@ fn write_private_key(path: &Path, content: &[u8]) -> Result<()> {
 
     Ok(())
 }
+
+/// 收紧 Windows 上私钥及其所在目录的 ACL。
+///
+/// 保留「Administrators」与「SYSTEM」，移除继承来的其它主体。
+/// 用 SID 而不是名字，避免非英文 Windows 上组名不同导致失败
+/// （`BUILTIN\Administrators` = `S-1-5-32-544`，`NT AUTHORITY\SYSTEM` = `S-1-5-18`）。
+///
+/// 失败时只**告警**不报错：Atlas 自己用 `russh` 读私钥不检查 ACL，
+/// 私钥仍然可用；ACL 只是为了让标准 SSH 工具链能接受它、同时收紧暴露面。
+#[cfg(windows)]
+fn harden_windows_acl(path: &Path) {
+    let targets: Vec<&Path> = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => vec![path, dir],
+        _ => vec![path],
+    };
+
+    for target in targets {
+        for args in [
+            vec!["/inheritance:r"],
+            vec!["/grant:r", "*S-1-5-32-544:F", "*S-1-5-18:F"],
+        ] {
+            let status = std::process::Command::new("icacls")
+                .arg(target)
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(_) => tracing::warn!(
+                    "收紧 {} 的 ACL 失败（icacls 返回非零）；私钥仍可被 Atlas 使用，\
+                     但 Windows 自带的 ssh/scp 可能拒绝它",
+                    target.display()
+                ),
+                Err(e) => tracing::warn!("调用 icacls 收紧 {} 的 ACL 失败: {e}", target.display()),
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn harden_windows_acl(_path: &Path) {}
