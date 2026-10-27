@@ -26,6 +26,7 @@ pub mod credentials;
 pub mod hostkey;
 pub mod keygen;
 pub mod path;
+pub mod server;
 
 pub use client::{RemoteEntry, SftpClient, SftpConnectOptions};
 pub use credentials::SftpCredentials;
