@@ -33,7 +33,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::credentials::SftpCredentials;
 use crate::hostkey::{self, UnknownHostPolicy};
-use crate::path::{join_remote, normalize_remote};
+use crate::path::{resolve_under_root, to_absolute_remote};
 
 /// 连接超时。
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -231,7 +231,9 @@ impl SftpClient {
             return Err(AtlasError::Sftp("SFTP 主机地址为空".into()));
         }
         let port = config.port;
-        let root = normalize_remote(config.root.as_deref().unwrap_or("/"))?;
+        // 根目录一律转成 SFTP 绝对路径（`C:\Users\...` → `/C:/Users/...`），
+        // 这样解析出来的路径是服务器认的形式，且 `..` 无法跳出根目录。
+        let root = to_absolute_remote(config.root.as_deref().unwrap_or("/"))?;
 
         let ssh_config = Arc::new(russh::client::Config {
             inactivity_timeout: Some(INACTIVITY_TIMEOUT),
@@ -481,8 +483,10 @@ impl SftpClient {
     }
 
     /// 把用户传入的远程路径解析为绝对远程路径。
+    ///
+    /// 绝对输入必须落在根目录之内；相对输入按 chroot 语义拼在根目录之下。
     fn resolve(&self, path: &str) -> Result<String> {
-        join_remote(&self.root, path)
+        resolve_under_root(&self.root, path)
     }
 }
 
@@ -571,14 +575,21 @@ mod tests {
     #[test]
     fn client_root_is_normalized_from_config() {
         let cfg = config(Some("/srv/./mc/"));
-        let root = normalize_remote(cfg.root.as_deref().unwrap_or("/")).unwrap();
+        let root = to_absolute_remote(cfg.root.as_deref().unwrap_or("/")).unwrap();
         assert_eq!(root, "/srv/mc");
+    }
+
+    #[test]
+    fn windows_根目录被转成_sftp_绝对路径() {
+        let cfg = config(Some("C:\\Users\\mc\\Desktop"));
+        let root = to_absolute_remote(cfg.root.as_deref().unwrap_or("/")).unwrap();
+        assert_eq!(root, "/C:/Users/mc/Desktop");
     }
 
     #[test]
     fn default_root_is_filesystem_root() {
         let cfg = config(None);
-        let root = normalize_remote(cfg.root.as_deref().unwrap_or("/")).unwrap();
+        let root = to_absolute_remote(cfg.root.as_deref().unwrap_or("/")).unwrap();
         assert_eq!(root, "/");
     }
 

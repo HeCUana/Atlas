@@ -181,55 +181,107 @@ pub fn parse_command(line: &str) -> Option<Command> {
     })
 }
 
-/// 把用户输入的路径与当前目录合并，返回**根目录相对**路径。
+/// 把用户输入的路径解析成**绝对**远程路径，且必须落在根目录之内。
 ///
-/// - 绝对输入（以 `/` 开头）原样返回（交给客户端按 chroot 语义处理）；
-/// - `..` 回退一级，但不能越过根；
-/// - 其它相对路径拼接在 `cwd` 之后。
-pub fn resolve_in_cwd(cwd: &str, input: &str) -> Result<String, String> {
+/// - `root` 是配置里的远程根目录（绝对路径，如 `/C:/Users/mc/Desktop` 或 `/`）；
+/// - `cwd` 是当前目录（**绝对**路径，始终在 `root` 之下）；
+/// - 绝对输入必须落在 `root` 之下，否则报错；
+/// - 相对输入拼在 `cwd` 之后；`..` 不能越过根。
+///
+/// 返回的是**绝对**路径，可直接显示给用户。
+pub fn resolve_in_cwd(root: &str, cwd: &str, input: &str) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() {
         return Ok(cwd.to_owned());
     }
-    if input.starts_with('/') {
-        return Ok(input.trim_start_matches('/').to_owned());
-    }
 
-    let mut stack: Vec<&str> = cwd.split('/').filter(|s| !s.is_empty()).collect();
-    for seg in input.split('/') {
+    let root_trimmed = root.trim_end_matches('/');
+    // 当前目录相对根目录的部分。
+    let cwd_rel = if root_trimmed.is_empty() {
+        cwd.trim_start_matches('/')
+    } else {
+        cwd.strip_prefix(root_trimmed)
+            .unwrap_or("")
+            .trim_start_matches('/')
+    };
+
+    let rel = if input.starts_with('/') {
+        // 绝对路径：必须落在根目录之下（`/` 视为根本身）。
+        if root_trimmed.is_empty() {
+            input.trim_start_matches('/').to_owned()
+        } else if input == "/" || input == root_trimmed {
+            String::new()
+        } else if let Some(rest) = input.strip_prefix(&format!("{root_trimmed}/")) {
+            rest.to_owned()
+        } else {
+            return Err(format!("{input} 越出根目录 {root}"));
+        }
+    } else if cwd_rel.is_empty() {
+        input.to_owned()
+    } else {
+        format!("{cwd_rel}/{input}")
+    };
+
+    // 规整 `.` 与 `..`。
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in rel.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
                 if stack.pop().is_none() {
-                    return Err(format!("{input} 越出根目录"));
+                    return Err(format!("{input} 越出根目录 {root}"));
                 }
             }
             other => stack.push(other),
         }
     }
-    Ok(stack.join("/"))
+    Ok(abs_join(root, &stack.join("/")))
+}
+
+/// 把根目录相对路径拼成绝对路径。
+fn abs_join(root: &str, rel: &str) -> String {
+    let root_trimmed = root.trim_end_matches('/');
+    if rel.is_empty() {
+        if root_trimmed.is_empty() {
+            "/".to_owned()
+        } else {
+            root_trimmed.to_owned()
+        }
+    } else if root_trimmed.is_empty() {
+        format!("/{rel}")
+    } else {
+        format!("{root_trimmed}/{rel}")
+    }
 }
 
 /// 交互式会话状态。
 pub struct Session {
     client: SftpClient,
-    /// 远端当前目录（根目录相对）。
+    /// 远端当前目录（**绝对**路径，始终在根目录之下）。
     cwd: String,
     /// 本地当前目录。
     local_cwd: PathBuf,
-    /// 远端根目录（仅用于显示）。
+    /// 远端根目录（**绝对**路径，如 `/C:/Users/mc/Desktop` 或 `/`）。
     root: String,
 }
 
 impl Session {
     /// 创建会话。
+    ///
+    /// `root` 是远程根目录（**绝对**路径）；会话的当前目录从根目录开始。
     pub fn new(client: SftpClient, root: String) -> Self {
+        let cwd = root.clone();
         Self {
             client,
-            cwd: String::new(),
+            cwd,
             local_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root,
         }
+    }
+
+    /// 当前远端目录的**绝对**路径（用于提示与显示）。
+    pub fn cwd_display(&self) -> String {
+        self.cwd.clone()
     }
 
     /// 执行一条命令，返回 `false` 表示应退出会话。
@@ -239,19 +291,14 @@ impl Session {
             Command::Quit => return false,
             Command::Help => print_help(),
             Command::Pwd => {
-                let shown = if self.cwd.is_empty() {
-                    "/".to_owned()
-                } else {
-                    format!("/{}", self.cwd)
-                };
-                println!("远端当前目录: {shown}");
+                println!("远端当前目录: {}", self.cwd_display());
             }
             Command::Lpwd => {
                 println!("本地当前目录: {}", self.local_cwd.display());
             }
             Command::Ls { path } => {
                 let target = match path {
-                    Some(p) => match resolve_in_cwd(&self.cwd, &p) {
+                    Some(p) => match resolve_in_cwd(&self.root, &self.cwd, &p) {
                         Ok(v) => v,
                         Err(e) => {
                             eprintln!("错误: {e}");
@@ -266,7 +313,7 @@ impl Session {
                 }
             }
             Command::Stat { path } => {
-                let target = match resolve_in_cwd(&self.cwd, &path) {
+                let target = match resolve_in_cwd(&self.root, &self.cwd, &path) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("错误: {e}");
@@ -286,7 +333,7 @@ impl Session {
                 }
             }
             Command::Cd { path } => {
-                match resolve_in_cwd(&self.cwd, &path) {
+                match resolve_in_cwd(&self.root, &self.cwd, &path) {
                     Ok(target) => {
                         // 先确认确实是目录，再切换。
                         match self.client.stat(&target).await {
@@ -307,7 +354,7 @@ impl Session {
                 }
             }
             Command::Get { remote, local } => {
-                let target = match resolve_in_cwd(&self.cwd, &remote) {
+                let target = match resolve_in_cwd(&self.root, &self.cwd, &remote) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("错误: {e}");
@@ -327,7 +374,7 @@ impl Session {
                     self.local_cwd.join(&local)
                 };
                 let target = match remote {
-                    Some(r) => match resolve_in_cwd(&self.cwd, &r) {
+                    Some(r) => match resolve_in_cwd(&self.root, &self.cwd, &r) {
                         Ok(v) => v,
                         Err(e) => {
                             eprintln!("错误: {e}");
@@ -336,7 +383,8 @@ impl Session {
                     },
                     None => {
                         let name = file_name_of(&source.to_string_lossy());
-                        resolve_in_cwd(&self.cwd, &name).unwrap_or_else(|_| name.clone())
+                        resolve_in_cwd(&self.root, &self.cwd, &name)
+                            .unwrap_or_else(|_| name.clone())
                     }
                 };
                 match self.client.upload(&source, &target).await {
@@ -345,7 +393,7 @@ impl Session {
                 }
             }
             Command::Rm { path } => {
-                let target = match resolve_in_cwd(&self.cwd, &path) {
+                let target = match resolve_in_cwd(&self.root, &self.cwd, &path) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("错误: {e}");
@@ -358,7 +406,7 @@ impl Session {
                 }
             }
             Command::Rmdir { path } => {
-                let target = match resolve_in_cwd(&self.cwd, &path) {
+                let target = match resolve_in_cwd(&self.root, &self.cwd, &path) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("错误: {e}");
@@ -371,7 +419,7 @@ impl Session {
                 }
             }
             Command::Mkdir { path } => {
-                let target = match resolve_in_cwd(&self.cwd, &path) {
+                let target = match resolve_in_cwd(&self.root, &self.cwd, &path) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("错误: {e}");
@@ -466,11 +514,7 @@ pub async fn run(mut session: Session) {
     let mut lines = stdin.lines();
 
     loop {
-        let cwd = if session.cwd.is_empty() {
-            "/".to_owned()
-        } else {
-            format!("/{}", session.cwd)
-        };
+        let cwd = session.cwd_display();
         print!("sftp:{cwd}> ");
         use std::io::Write;
         let _ = std::io::stdout().flush();
@@ -556,22 +600,74 @@ mod tests {
 
     #[test]
     fn 相对路径与当前目录合并() {
-        assert_eq!(resolve_in_cwd("", "a/b").unwrap(), "a/b");
-        assert_eq!(resolve_in_cwd("a", "b").unwrap(), "a/b");
-        assert_eq!(resolve_in_cwd("a/b", "c").unwrap(), "a/b/c");
-        assert_eq!(resolve_in_cwd("a/b", "..").unwrap(), "a");
-        assert_eq!(resolve_in_cwd("a", "./b").unwrap(), "a/b");
+        let root = "/srv/mc";
+        assert_eq!(resolve_in_cwd(root, root, "a/b").unwrap(), "/srv/mc/a/b");
+        assert_eq!(
+            resolve_in_cwd(root, "/srv/mc/a", "b").unwrap(),
+            "/srv/mc/a/b"
+        );
+        assert_eq!(
+            resolve_in_cwd(root, "/srv/mc/a/b", "c").unwrap(),
+            "/srv/mc/a/b/c"
+        );
+        assert_eq!(
+            resolve_in_cwd(root, "/srv/mc/a/b", "..").unwrap(),
+            "/srv/mc/a"
+        );
+        assert_eq!(
+            resolve_in_cwd(root, "/srv/mc/a", "./b").unwrap(),
+            "/srv/mc/a/b"
+        );
     }
 
     #[test]
-    fn 绝对路径不被当前目录改写() {
-        assert_eq!(resolve_in_cwd("a/b", "/c/d").unwrap(), "c/d");
+    fn 空输入返回当前目录() {
+        assert_eq!(
+            resolve_in_cwd("/srv/mc", "/srv/mc/a/b", "").unwrap(),
+            "/srv/mc/a/b"
+        );
+    }
+
+    #[test]
+    fn 根目录内的绝对路径被接受() {
+        let root = "/srv/mc";
+        assert_eq!(
+            resolve_in_cwd(root, "/srv/mc/a", "/srv/mc/x").unwrap(),
+            "/srv/mc/x"
+        );
+        assert_eq!(
+            resolve_in_cwd(root, "/srv/mc/a", "/srv/mc").unwrap(),
+            "/srv/mc"
+        );
+        // "/" 视为根本身。
+        assert_eq!(resolve_in_cwd(root, "/srv/mc/a", "/").unwrap(), "/srv/mc");
+    }
+
+    #[test]
+    fn 根目录外的绝对路径被拒绝() {
+        let root = "/srv/mc";
+        assert!(resolve_in_cwd(root, "/srv/mc/a", "/etc/passwd").is_err());
+        assert!(resolve_in_cwd(root, "/srv/mc/a", "/srv/other").is_err());
     }
 
     #[test]
     fn 上级目录不能越过根() {
-        assert!(resolve_in_cwd("", "..").is_err());
-        assert!(resolve_in_cwd("a", "../..").is_err());
+        assert!(resolve_in_cwd("/srv/mc", "/srv/mc", "..").is_err());
+        assert!(resolve_in_cwd("/srv/mc", "/srv/mc/a", "../..").is_err());
+    }
+
+    #[test]
+    fn windows_根目录也能工作() {
+        let root = "/C:/Users/mc/Desktop";
+        assert_eq!(
+            resolve_in_cwd(root, root, "sub").unwrap(),
+            "/C:/Users/mc/Desktop/sub"
+        );
+        assert_eq!(
+            resolve_in_cwd(root, "/C:/Users/mc/Desktop/sub", "..").unwrap(),
+            "/C:/Users/mc/Desktop"
+        );
+        assert!(resolve_in_cwd(root, root, "/C:/Windows").is_err());
     }
 
     #[test]

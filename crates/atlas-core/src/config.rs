@@ -363,6 +363,9 @@ impl AtlasConfig {
              #\n\
              # 注意：Atlas 是 SFTP **客户端**，host 填**远端**服务器地址，\n\
              # 不是本机（本机没装 SSH 服务时连 127.0.0.1 必然 ECONNREFUSED）。\n\
+             #\n\
+             # root 决定会话从哪里开始，同时也是访问边界：`..` 无法越出。\n\
+             # Windows 路径会自动转成 SFTP 绝对形式（C:\\Users\\... → /C:/Users/...）。\n\
              # [sftp]\n\
              # host = \"192.168.1.10\"\n\
              # port = 22\n\
@@ -371,7 +374,7 @@ impl AtlasConfig {
              # key_passphrase = \"\"       # 私钥被加密时才需要\n\
              # known_hosts_path = \"\"     # 留空则用 ~/.ssh/known_hosts\n\
              # accept_unknown_host = false # 首次连接新主机时才临时开启\n\
-             # root = \"/home/mc\"\n",
+             # root = \"/srv/minecraft\"\n",
         );
         out
     }

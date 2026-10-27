@@ -215,6 +215,44 @@ host = "192.168.1.10"        # 远端服务器地址，不是本机
 port = 22
 username = "mc"
 key_path = "keys/id_ed25519" # `atlas keygen` 生成的私钥
+root = "/srv/minecraft"        # 可选：把 SFTP 会话限制在这个目录之下
+```
+
+#### 可配置的远程根目录
+
+`root` 决定 SFTP 会话**从哪里开始**，同时也是**访问边界**：
+
+- 省略 `root` → 会话从文件系统根开始（Linux 上是 `/`，Windows 上是盘根）；
+- 设置 `root` → 会话从该目录开始，并且**无法越出**（`..` 会被拒绝）。
+
+```console
+$ atlas sftp
+远端根目录: /C:/Users/Administrator/Desktop
+Atlas SFTP 交互会话 — 远端根目录: /C:/Users/Administrator/Desktop
+sftp:/C:/Users/Administrator/Desktop> cd 02_开发与AI
+sftp:/C:/Users/Administrator/Desktop/02_开发与AI> stat /C:/Windows
+错误: /C:/Windows 越出根目录 /C:/Users/Administrator/Desktop
+```
+
+路径规则：
+
+| 输入 | 含义 |
+| --- | --- |
+| `plugins` | 相对**当前目录** |
+| `/` | **根目录**本身 |
+| `/srv/mc/x` | 绝对路径，必须落在 `root` 之下，否则拒绝 |
+| `..` | 上级目录，但不能越过 `root` |
+
+Windows 路径会被自动转成 SFTP 的绝对 POSIX 形式：`C:\Users\Administrator\Desktop` → `/C:/Users/Administrator/Desktop`（与 sshd 返回的路径形式一致，第三方工具看到的是同一种路径）。
+
+> **第三方客户端（FileZilla 等）不受这个配置约束**——它们连的是 sshd，落地目录由 sshd 决定。要让 FileZilla 也从指定目录开始，在「站点管理器 → 高级 → 默认远程目录」填同样的路径（那只是**起始目录**，仍可往上跳）。
+
+```toml
+[sftp]
+host = "192.168.1.10"        # 远端服务器地址，不是本机
+port = 22
+username = "mc"
+key_path = "keys/id_ed25519" # `atlas keygen` 生成的私钥
 ```
 
 **连不上时的排查顺序**（`ECONNREFUSED` / `os error 10061`）：

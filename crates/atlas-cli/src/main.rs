@@ -134,8 +134,8 @@ enum Commands {
 enum SftpAction {
     /// 列出远端目录。
     Ls {
-        /// 远端路径。
-        path: String,
+        /// 远端路径（省略则列当前目录）。
+        path: Option<String>,
     },
     /// 查看远端文件或目录信息。
     Stat {
@@ -542,7 +542,7 @@ async fn async_run(cli: Cli) -> Result<()> {
 
             match action {
                 Some(SftpAction::Ls { path }) => {
-                    let entries = client.list(&path).await?;
+                    let entries = client.list(path.as_deref().unwrap_or("")).await?;
                     if entries.is_empty() {
                         println!("（空目录）");
                     } else {
@@ -584,10 +584,10 @@ async fn async_run(cli: Cli) -> Result<()> {
                 }
                 // 不带子命令 → 进入交互式会话。
                 None => {
-                    let session = sftp_session::Session::new(
-                        client,
-                        sftp_config.root.clone().unwrap_or_default(),
-                    );
+                    // 根目录已是客户端规整过的绝对路径。
+                    let root = client.root().to_owned();
+                    println!("远端根目录: {root}");
+                    let session = sftp_session::Session::new(client, root);
                     sftp_session::run(session).await;
                 }
             }

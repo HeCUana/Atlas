@@ -52,4 +52,8 @@ plugin_dir = "plugins"
 # key_passphrase = ""        # 私钥被加密时才需要
 # known_hosts_path = ""      # 留空则用 ~/.ssh/known_hosts
 # accept_unknown_host = false # 首次连接新主机时才临时开启
-# root = "/home/mc"
+#
+# 远程根目录：SFTP 会话从这里开始，并且无法越出（`..` 会被拒绝）。
+# Windows 路径会自动转成 SFTP 绝对形式（C:\Users\... → /C:/Users/...）。
+# 省略则从文件系统根开始。
+# root = "/srv/minecraft"

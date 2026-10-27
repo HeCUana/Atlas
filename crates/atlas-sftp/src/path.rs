@@ -84,6 +84,112 @@ pub fn normalize_remote(path: &str) -> Result<String> {
     }
 }
 
+/// 把用户填写的**远程根目录**转成 SFTP 绝对路径。
+///
+/// SFTP 的路径一律是 POSIX 风格（`/` 分隔），而 Windows 上用户习惯写
+/// `C:\Users\Administrator\Desktop`。本函数负责把两者统一：
+///
+/// | 输入 | 输出 |
+/// | --- | --- |
+/// | `C:\Users\Administrator\Desktop` | `/C:/Users/Administrator/Desktop` |
+/// | `C:/Users/Administrator/Desktop` | `/C:/Users/Administrator/Desktop` |
+/// | `/srv/mc` | `/srv/mc` |
+/// | `/` 或空串 | `/` |
+///
+/// Windows OpenSSH 的 sftp-server 会把 `C:/Users/...` 归一化成
+/// `/C:/Users/...`，所以这里直接产出后者——Atlas 客户端与第三方 SFTP 工具
+/// 看到的路径形式一致。
+///
+/// # 错误
+///
+/// 路径形如 `C:foo`（盘符后既不是 `:` 也不是分隔符）时返回 [`AtlasError::Sftp`]。
+///
+/// # 示例
+///
+/// ```
+/// use atlas_sftp::path::to_absolute_remote;
+///
+/// assert_eq!(to_absolute_remote("C:\\Users\\mc\\Desktop").unwrap(), "/C:/Users/mc/Desktop");
+/// assert_eq!(to_absolute_remote("/srv/mc").unwrap(), "/srv/mc");
+/// assert_eq!(to_absolute_remote("/").unwrap(), "/");
+/// ```
+pub fn to_absolute_remote(path: &str) -> Result<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == REMOTE_SEP.to_string() {
+        return Ok(REMOTE_SEP.to_string());
+    }
+
+    // Windows 反斜杠统一成正斜杠。
+    let unified = trimmed.replace('\\', "/");
+
+    // 盘符形式 `C:/...` → `/C:/...`
+    let bytes = unified.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let rest = &unified[2..];
+        if rest.is_empty() || rest.starts_with('/') {
+            return Ok(format!("/{unified}"));
+        }
+        return Err(AtlasError::Sftp(format!("远程根目录 {path} 不是合法路径")));
+    }
+
+    if unified.starts_with(REMOTE_SEP) {
+        return normalize_remote(&unified);
+    }
+
+    // 相对路径按"文件系统根"处理——SFTP 侧没有可依赖的"当前目录"概念。
+    Ok(format!("/{unified}"))
+}
+
+/// 把用户路径解析成**绝对**远程路径，且不得越出根目录。
+///
+/// - 绝对输入：必须落在 `root` 之下，原样返回（`/` 视为 `root` 本身）；
+/// - 相对输入：拼在 `root` 之下。
+///
+/// 也就是说 `/etc/passwd` 是**绝对**路径——它不在受限根之下，会被拒绝；
+/// 想访问根下的 `etc` 要写相对路径 `etc`。
+///
+/// # 错误
+///
+/// 绝对输入落在 `root` 之外时返回 [`AtlasError::Sftp`]。
+///
+/// # 示例
+///
+/// ```
+/// use atlas_sftp::path::resolve_under_root;
+///
+/// assert_eq!(resolve_under_root("/srv/mc", "plugins").unwrap(), "/srv/mc/plugins");
+/// assert_eq!(resolve_under_root("/srv/mc", "/srv/mc/x").unwrap(), "/srv/mc/x");
+/// assert!(resolve_under_root("/srv/mc", "/etc/passwd").is_err());
+/// ```
+pub fn resolve_under_root(root: &str, path: &str) -> Result<String> {
+    let root = to_absolute_remote(root)?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(root);
+    }
+
+    if !path.starts_with(REMOTE_SEP) {
+        return join_remote(&root, path);
+    }
+
+    let root_trimmed = root.trim_end_matches(REMOTE_SEP);
+    if root_trimmed.is_empty() {
+        // 根就是 `/`，任何绝对路径都在其下。
+        return normalize_remote(path);
+    }
+    if path == REMOTE_SEP.to_string() || path == root_trimmed {
+        return Ok(root_trimmed.to_owned());
+    }
+    if let Some(rest) = path.strip_prefix(&format!("{root_trimmed}/")) {
+        // 注意：这里要拼回**根目录**，而不是拼一个 "/"——
+        // 否则 `/srv/mc/x` 会被错误地变成 `/x`。
+        return normalize_remote(&format!("{root_trimmed}/{rest}"));
+    }
+    Err(AtlasError::Sftp(format!(
+        "远程路径 {path} 越出根目录 {root}"
+    )))
+}
+
 /// 拼接远程路径。
 ///
 /// - `base` 是远程根目录，可以是空串、`/` 或普通目录（允许结尾带 `/`）；
