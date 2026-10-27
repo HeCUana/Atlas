@@ -50,6 +50,11 @@ pub struct Status {
     pub authorized_keys_has_private_key: bool,
     /// 本机主机公钥是否已在 `known_hosts` 里。
     pub known_host_present: bool,
+    /// 本机 SSH **主机密钥**的 SHA256 指纹。
+    ///
+    /// 第三方 SFTP 客户端（FileZilla / WinSCP）首次连接会弹"未知主机密钥"
+    /// 并显示指纹——把这个指纹给运维核对，才能确认连的是真服务器。
+    pub host_key_fingerprint: Option<String>,
 }
 
 impl Status {
@@ -109,6 +114,7 @@ pub fn status(private_key: &std::path::Path) -> Result<Status> {
     });
 
     let known_host_present = known_host_present();
+    let host_key_fingerprint = host_key_fingerprint();
 
     Ok(Status {
         installed,
@@ -121,7 +127,26 @@ pub fn status(private_key: &std::path::Path) -> Result<Status> {
         public_key_file_stale,
         authorized_keys_has_private_key,
         known_host_present,
+        host_key_fingerprint,
     })
+}
+
+/// 本机 SSH 主机密钥的指纹。
+fn host_key_fingerprint() -> Option<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        candidates.push(PathBuf::from(
+            r"C:\ProgramData\ssh\ssh_host_ed25519_key.pub",
+        ));
+    } else {
+        candidates.push(PathBuf::from("/etc/ssh/ssh_host_ed25519_key.pub"));
+    }
+    for path in candidates {
+        if let Ok(fp) = atlas_sftp::keygen::fingerprint_file(&path) {
+            return Some(fp);
+        }
+    }
+    None
 }
 
 /// 在所有候选 `authorized_keys` 里查找包含该公钥的文件。

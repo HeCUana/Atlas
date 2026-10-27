@@ -622,6 +622,10 @@ async fn async_run(cli: Cli) -> Result<()> {
                     println!("    ↳ ⚠ .pub 文件与私钥不匹配（陈旧），以私钥推导的公钥为准");
                 }
                 println!("  known_hosts   {}", mark(st.known_host_present));
+                if let Some(fp) = &st.host_key_fingerprint {
+                    println!("  主机密钥指纹  {fp}");
+                    println!("    ↳ 第三方客户端首次连接弹出的指纹应与此一致");
+                }
                 println!();
                 if st.authorized_keys_has_private_key {
                     println!("⛔ 严重：authorized_keys 里混有**私钥**内容。");

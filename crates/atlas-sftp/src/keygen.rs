@@ -243,6 +243,31 @@ pub fn derive_public_key(private_key_path: &Path) -> Result<String> {
         .map_err(|e| AtlasError::Sftp(format!("导出公钥失败: {e}")))
 }
 
+/// 计算一个公钥文件的 SHA256 指纹（`SHA256:...` 形式）。
+///
+/// 用途：第三方 SFTP 客户端（FileZilla / WinSCP / PuTTY）首次连接时会弹出
+/// "未知主机密钥"并显示指纹——把这里的指纹给运维核对，才能确认连的是真服务器
+/// 而不是中间人。
+///
+/// # 错误
+///
+/// 文件不存在、不是合法公钥时返回 [`AtlasError::Sftp`]。
+pub fn fingerprint_file(public_key_path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(public_key_path).map_err(|e| {
+        AtlasError::Sftp(format!(
+            "读取公钥文件 {} 失败: {e}",
+            public_key_path.display()
+        ))
+    })?;
+    let key = russh::keys::parse_public_key_base64(
+        text.split_whitespace()
+            .nth(1)
+            .ok_or_else(|| AtlasError::Sftp("公钥文件格式不正确".into()))?,
+    )
+    .map_err(|e| AtlasError::Sftp(format!("解析公钥失败: {e}")))?;
+    Ok(key.fingerprint(HashAlg::Sha256).to_string())
+}
+
 /// 判断一段文本里是否混入了**私钥**内容。
 ///
 /// 两种形态都要认：

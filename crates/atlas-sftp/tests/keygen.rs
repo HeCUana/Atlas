@@ -355,6 +355,26 @@ fn 能识别出只有_base64_正文的私钥() {
 }
 
 #[test]
+fn 能算出公钥文件的_sha256_指纹() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519");
+    let pair = generate_ed25519(&private_path, Some("atlas"), false).expect("生成应成功");
+
+    let fp = atlas_sftp::keygen::fingerprint_file(&pair.public_path).expect("应能算出指纹");
+    assert!(fp.starts_with("SHA256:"), "指纹格式应正确：{fp}");
+
+    // 同一把公钥，算出来的指纹必须一致。
+    let again = atlas_sftp::keygen::fingerprint_file(&pair.public_path).expect("应能算出指纹");
+    assert_eq!(fp, again);
+
+    // 文件不存在时应报错。
+    assert!(
+        atlas_sftp::keygen::fingerprint_file(&dir.path().join("不存在.pub")).is_err(),
+        "公钥文件不存在时应报错"
+    );
+}
+
+#[test]
 fn 正常的公钥不会被误判为私钥() {
     let dir = tempfile::tempdir().expect("创建临时目录失败");
     let private_path = dir.path().join("id_ed25519");

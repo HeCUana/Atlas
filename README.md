@@ -314,6 +314,32 @@ SFTP 就绪 ✓
 >
 > `status` 也会主动检测 `authorized_keys` 里是否混入了私钥（带 PEM 头的完整私钥，或只剩 base64 正文的形态）并高亮告警。
 
+#### 用第三方 SFTP 客户端连本机（FileZilla / WinSCP / PuTTY）
+
+`atlas sshd status` 会打印**主机密钥指纹**——客户端首次连接弹出的"未知主机密钥"指纹必须与它一致，否则可能是中间人。
+
+```
+$ atlas sshd status
+  ...
+  主机密钥指纹  SHA256:NFrOZeHA1s6tSe12w68l7ZTfWhi7+sIrMpDC3YqgEZ0
+```
+
+客户端参数（以 FileZilla 的「站点管理器」为例）：
+
+| 项 | 值 | 常见踩坑 |
+| --- | --- | --- |
+| 协议 | **SFTP - SSH File Transfer Protocol** | 选成 FTP 会连 21 端口，直接被拒 |
+| 主机 | `127.0.0.1` | **别填 `localhost`**（可能解析成 ::1） |
+| 端口 | `22` | |
+| 用户名 | `Administrator` | 必须填**真实存在的 Windows 账户**；填不存在的会看到服务端日志里的 `Invalid user xxx` |
+| 登录类型 | **密钥文件**（Key file） | 选成"智能卡"会走 PKCS#11 路径，根本不读普通私钥 |
+| 私钥文件 | `C:\Users\<你>\Desktop\Atlas\keys\id_ed25519` | **绝不要选 `C:\ProgramData\ssh\ssh_host_ed25519_key`**——那是服务器的身份密钥，不是给客户端用的 |
+| 字符集 | UTF-8 | 中文文件名乱码时改这里 |
+
+> **Windows 管理员账户的公钥位置**：`C:\ProgramData\ssh\administrators_authorized_keys`（`sshd_config` 的 `Match Group administrators` 规则），不是 `~/.ssh/authorized_keys`。`atlas sshd authorize` 会自动装到正确位置并收紧 ACL。
+>
+> **私钥格式**：FileZilla 3.60+ 原生支持 OpenSSH 格式私钥（`-----BEGIN OPENSSH PRIVATE KEY-----`），无需转成 PuTTY 的 `.ppk`。
+
 ### 2.6 运行方式
 
 `atlas start` 是**前台守护模式**：启动目标服务器后接管它们，按 `[服务器ID] ` 前缀实时输出各服务器的控制台行。
