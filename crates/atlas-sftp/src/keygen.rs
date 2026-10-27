@@ -221,6 +221,116 @@ pub fn public_path_of(private_path: &Path) -> PathBuf {
     private_path.with_extension("pub")
 }
 
+/// 从私钥文件推导出对应的公钥（OpenSSH 单行格式，不含注释）。
+///
+/// 比直接读 `.pub` 文件更可靠：`.pub` 可能已经陈旧（私钥被重新生成过），
+/// 而从私钥推导出来的公钥**永远是当前这把私钥的**。
+///
+/// # 错误
+///
+/// 私钥文件不存在、无法解析或不是支持的格式时返回 [`AtlasError::Sftp`]。
+pub fn derive_public_key(private_key_path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(private_key_path).map_err(|e| {
+        AtlasError::Sftp(format!(
+            "读取私钥文件 {} 失败: {e}",
+            private_key_path.display()
+        ))
+    })?;
+    let key = russh::keys::decode_secret_key(&text, None)
+        .map_err(|e| AtlasError::Sftp(format!("解析私钥失败: {e}")))?;
+    key.public_key()
+        .to_openssh()
+        .map_err(|e| AtlasError::Sftp(format!("导出公钥失败: {e}")))
+}
+
+/// 判断一段文本里是否混入了**私钥**内容。
+///
+/// 两种形态都要认：
+/// 1. 带 PEM 头的完整私钥（`-----BEGIN OPENSSH PRIVATE KEY-----` 等）；
+/// 2. **只有 base64 正文**的私钥（`-----BEGIN/END` 被剥掉后的形态）——
+///    判据是解码后以 OpenSSH 私钥魔数 `openssh-key-v1` 开头。
+///
+/// 用来发现"私钥被误写进 `authorized_keys` / `known_hosts`"这类严重问题——
+/// 私钥出现在公钥位置既让认证失败，又是凭据泄漏。
+pub fn contains_private_key(text: &str) -> bool {
+    const PEM_MARKERS: [&str; 5] = [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+    ];
+    if PEM_MARKERS.iter().any(|m| text.contains(m)) {
+        return true;
+    }
+
+    // 只有 base64 正文的形态。
+    //
+    // OpenSSH 私钥正文按 **70 字符**换行——70 不是 4 的倍数，所以**单行不是
+    // 合法 base64**，必须把连续的 base64 行**拼接起来**再解码。
+    let joined: String = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && line.len() >= 16
+                && line
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+        })
+        .collect();
+
+    if joined.len().is_multiple_of(4)
+        && let Some(bytes) = base64_decode(&joined)
+        && bytes.starts_with(b"openssh-key-v1")
+    {
+        return true;
+    }
+
+    // 逐行也试一次（少数工具会把它写成整行）。
+    for line in text.lines() {
+        let line = line.trim();
+        if line.len() < 32 || !line.len().is_multiple_of(4) {
+            continue;
+        }
+        if let Some(bytes) = base64_decode(line)
+            && bytes.starts_with(b"openssh-key-v1")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 最小 base64 解码（避免为此引入额外依赖）。
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut lookup = [255u8; 256];
+    for (i, &c) in TABLE.iter().enumerate() {
+        lookup[c as usize] = i as u8;
+    }
+
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for &c in input.as_bytes() {
+        if c == b'=' {
+            break;
+        }
+        let v = lookup[c as usize];
+        if v == 255 {
+            return None;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 /// 写入私钥，并把权限收紧。
 ///
 /// Unix 下显式设为 `0600`（私钥被同机其它用户读到就等于凭据泄漏）；
@@ -261,35 +371,45 @@ fn write_private_key(path: &Path, content: &[u8]) -> Result<()> {
 /// 用 SID 而不是名字，避免非英文 Windows 上组名不同导致失败
 /// （`BUILTIN\Administrators` = `S-1-5-32-544`，`NT AUTHORITY\SYSTEM` = `S-1-5-18`）。
 ///
+/// ## 目录必须用可继承标志
+///
+/// `icacls /grant` 加上的 ACE 默认**只作用于该对象本身**，不传递给子对象。
+/// 若把目录也按同样方式收紧，目录里**之后新建的文件会继承到空 ACL**——
+/// 表现为文件明明存在却"访问被拒绝"。所以目录必须用 `(OI)(CI)` 标记可继承。
+///
 /// 失败时只**告警**不报错：Atlas 自己用 `russh` 读私钥不检查 ACL，
 /// 私钥仍然可用；ACL 只是为了让标准 SSH 工具链能接受它、同时收紧暴露面。
 #[cfg(windows)]
 fn harden_windows_acl(path: &Path) {
-    let targets: Vec<&Path> = match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => vec![path, dir],
-        _ => vec![path],
-    };
+    // 文件：权限只作用于自身。
+    harden_one(path, "*S-1-5-32-544:F", "*S-1-5-18:F");
+    // 目录：权限要能继承给里面新建的文件。
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        harden_one(dir, "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F");
+    }
+}
 
-    for target in targets {
-        for args in [
-            vec!["/inheritance:r"],
-            vec!["/grant:r", "*S-1-5-32-544:F", "*S-1-5-18:F"],
-        ] {
-            let status = std::process::Command::new("icacls")
-                .arg(target)
-                .args(&args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            match status {
-                Ok(s) if s.success() => {}
-                Ok(_) => tracing::warn!(
-                    "收紧 {} 的 ACL 失败（icacls 返回非零）；私钥仍可被 Atlas 使用，\
-                     但 Windows 自带的 ssh/scp 可能拒绝它",
-                    target.display()
-                ),
-                Err(e) => tracing::warn!("调用 icacls 收紧 {} 的 ACL 失败: {e}", target.display()),
-            }
+/// 对单个目标执行「去继承 + 授权」。
+#[cfg(windows)]
+fn harden_one(target: &Path, administrators: &str, system: &str) {
+    for args in [
+        vec!["/inheritance:r"],
+        vec!["/grant:r", administrators, system],
+    ] {
+        let status = std::process::Command::new("icacls")
+            .arg(target)
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(_) => tracing::warn!(
+                "收紧 {} 的 ACL 失败（icacls 返回非零）；私钥仍可被 Atlas 使用，\
+                 但 Windows 自带的 ssh/scp 可能拒绝它",
+                target.display()
+            ),
+            Err(e) => tracing::warn!("调用 icacls 收紧 {} 的 ACL 失败: {e}", target.display()),
         }
     }
 }

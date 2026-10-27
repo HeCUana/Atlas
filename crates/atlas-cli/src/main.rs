@@ -33,6 +33,7 @@ use clap::{Parser, Subcommand};
 
 mod scaffold;
 mod sftp_session;
+mod sshd;
 
 #[derive(Parser, Debug)]
 #[command(name = "atlas", version, about = "Atlas — Minecraft 多服务器管理工具")]
@@ -122,6 +123,11 @@ enum Commands {
         #[arg(long, default_value_t = 15)]
         timeout: u64,
     },
+    /// 管理本机 SSH 服务端（sshd）——SFTP 连本机时的前提。
+    Sshd {
+        #[command(subcommand)]
+        action: SshdAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -165,6 +171,20 @@ enum SftpAction {
         /// 远端路径。
         path: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SshdAction {
+    /// 查询服务状态与 SFTP 就绪情况。
+    Status,
+    /// 启动服务（并设为开机自启）。
+    Start,
+    /// 停止服务。
+    Stop,
+    /// 安装 SSH 服务端。
+    Install,
+    /// 把 Atlas 客户端公钥装进服务端的 authorized_keys。
+    Authorize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -572,9 +592,111 @@ async fn async_run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Commands::Sshd { action } => match action {
+            SshdAction::Status => {
+                let key_path = atlas
+                    .config
+                    .sftp
+                    .as_ref()
+                    .and_then(|s| s.key_path.clone())
+                    .unwrap_or_else(|| PathBuf::from(AtlasConfig::DEFAULT_KEY_PATH));
+                let st = sshd::status(&key_path)?;
+                println!("本机 SSH 服务端（sshd）状态");
+                println!("  服务已安装    {}", mark(st.installed));
+                println!("  服务正在运行  {}", mark(st.running));
+                println!(
+                    "  开机自启      {}",
+                    st.startup.as_deref().unwrap_or("未知")
+                );
+                println!(
+                    "  {} 端口监听   {}",
+                    sshd::DEFAULT_SSH_PORT,
+                    mark(st.port_listening)
+                );
+                println!("  客户端私钥    {}", mark(st.private_key_present));
+                println!("  公钥已授权    {}", mark(st.public_key_installed));
+                if let Some(p) = &st.public_key_path {
+                    println!("    ↳ {}", p.display());
+                }
+                if st.public_key_file_stale {
+                    println!("    ↳ ⚠ .pub 文件与私钥不匹配（陈旧），以私钥推导的公钥为准");
+                }
+                println!("  known_hosts   {}", mark(st.known_host_present));
+                println!();
+                if st.authorized_keys_has_private_key {
+                    println!("⛔ 严重：authorized_keys 里混有**私钥**内容。");
+                    println!("   私钥出现在公钥位置既让认证失败，也等于凭据泄漏。");
+                    println!("   请人工清理该文件；曾经写入的私钥应视为已泄漏，需作废并重新生成。");
+                    println!();
+                }
+                if st.is_ready() {
+                    println!("SFTP 就绪 ✓");
+                } else {
+                    println!("SFTP 尚未就绪，缺这几项：");
+                    let mut blockers = 0usize;
+                    if !st.installed {
+                        println!("  · 未安装 SSH 服务端 → `atlas sshd install`");
+                        blockers += 1;
+                    }
+                    if !st.running {
+                        println!("  · 服务未运行 → `atlas sshd start`");
+                        blockers += 1;
+                    }
+                    if !st.port_listening {
+                        println!("  · 端口未监听 → 检查服务状态与防火墙");
+                        blockers += 1;
+                    }
+                    if !st.private_key_present {
+                        println!("  · 客户端私钥不存在 → `atlas keygen`");
+                        blockers += 1;
+                    }
+                    if !st.public_key_installed {
+                        println!("  · 公钥未装进服务端 → 运行 `atlas sshd authorize`");
+                        blockers += 1;
+                    }
+                    if !st.known_host_present {
+                        println!(
+                            "  · 主机公钥不在 known_hosts → 首次连接用 `atlas sftp --accept-unknown-host`"
+                        );
+                        blockers += 1;
+                    }
+                    if blockers == 0 {
+                        // 唯一的阻塞项是上面已提示过的私钥污染。
+                        println!("  · authorized_keys 混有私钥内容 → 见上方说明");
+                    }
+                }
+            }
+            SshdAction::Start => {
+                sshd::start()?;
+                println!("sshd 已启动（并设为开机自启）。");
+            }
+            SshdAction::Stop => {
+                sshd::stop()?;
+                println!("sshd 已停止。");
+            }
+            SshdAction::Install => {
+                sshd::install()?;
+                println!("SSH 服务端已安装。接下来运行 `atlas sshd start` 启动它。");
+            }
+            SshdAction::Authorize => {
+                let key_path = atlas
+                    .config
+                    .sftp
+                    .as_ref()
+                    .and_then(|s| s.key_path.clone())
+                    .unwrap_or_else(|| PathBuf::from(AtlasConfig::DEFAULT_KEY_PATH));
+                let target = sshd::authorize(&key_path)?;
+                println!("客户端公钥已装入 {}", target.display());
+            }
+        },
     }
 
     Ok(())
+}
+
+/// 就绪检查里的勾 / 叉。
+fn mark(ok: bool) -> &'static str {
+    if ok { "✓" } else { "✗" }
 }
 
 /// 解析目标服务器列表：未指定时按 `auto_start` 或全部。

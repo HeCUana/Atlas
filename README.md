@@ -276,10 +276,45 @@ Permissions for 'keys\id_ed25519' are too open.
 icacls "keys\id_ed25519" /inheritance:r
 icacls "keys\id_ed25519" /grant '*S-1-5-32-544:F' '*S-1-5-18:F'
 icacls "keys" /inheritance:r
-icacls "keys" /grant '*S-1-5-32-544:F' '*S-1-5-18:F'
+icacls "keys" /grant '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F'
 ```
 
-### 2.5 运行方式
+> 目录的授权**必须带 `(OI)(CI)`**（可继承）。`icacls /grant` 加的 ACE 默认只作用于该对象自身，目录不带继承标志的话，之后在目录里新建的文件会继承到**空 ACL**——文件存在却"访问被拒绝"。
+
+### 2.5 本机 SSH 服务端（`atlas sshd`）
+
+SFTP 连本机时，前提是本机有 SSH 服务在跑。`atlas sshd` 负责这件事，并附带一份**就绪检查**：
+
+```console
+$ atlas sshd status
+本机 SSH 服务端（sshd）状态
+  服务已安装    ✓
+  服务正在运行  ✓
+  开机自启      Automatic
+  22 端口监听   ✓
+  客户端私钥    ✓
+  公钥已授权    ✓
+    ↳ C:\ProgramData\ssh\administrators_authorized_keys
+  known_hosts   ✓
+
+SFTP 就绪 ✓
+```
+
+| 子命令 | 说明 |
+| --- | --- |
+| `atlas sshd status` | 查询服务状态 + SFTP 就绪检查（服务、端口、私钥、公钥、known_hosts、**私钥污染**） |
+| `atlas sshd start` | 启动服务并设为开机自启 |
+| `atlas sshd stop` | 停止服务 |
+| `atlas sshd install` | 安装 SSH 服务端（Windows 装 OpenSSH Server 可选功能） |
+| `atlas sshd authorize` | 把客户端公钥装进服务端的 `authorized_keys`（并收紧 ACL） |
+
+> **安全约定**：启动 SSH 服务会对外开放 22 端口，属于安全敏感操作。所以这里只有**显式命令**，**绝不在 Atlas 启动时自动开启**。
+>
+> `authorize` 从**私钥**推导公钥（不依赖可能陈旧的 `.pub` 文件），并且**拒绝**往混有私钥的文件里写——那只会掩盖问题。曾经写进 `authorized_keys` 的私钥应视为**已泄漏**，需要作废并重新生成。
+>
+> `status` 也会主动检测 `authorized_keys` 里是否混入了私钥（带 PEM 头的完整私钥，或只剩 base64 正文的形态）并高亮告警。
+
+### 2.6 运行方式
 
 `atlas start` 是**前台守护模式**：启动目标服务器后接管它们，按 `[服务器ID] ` 前缀实时输出各服务器的控制台行。
 

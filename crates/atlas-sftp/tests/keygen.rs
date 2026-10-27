@@ -228,6 +228,27 @@ fn 格式名可解析且默认文件名不同() {
     assert_eq!(KeyFormat::Pkcs8.default_file_name(), "id_ed25519.pem");
 }
 
+/// Windows 上密钥目录收紧后，**新建**的文件必须仍然可读。
+/// Windows 上密钥目录收紧后，**新建**的文件必须仍然可读。
+///
+/// 回归测试：`icacls /grant` 加的 ACE 默认只作用于对象自身，不传递给子对象。
+/// 若把目录也按同样方式收紧，之后在目录里新建的文件（典型是 `.pub`）
+/// 会继承到**空 ACL**——文件存在却"访问被拒绝"。
+#[cfg(windows)]
+#[test]
+fn windows_下密钥目录收紧后新建文件仍可读() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let keys_dir = dir.path().join("keys");
+    let private_path = keys_dir.join("id_ed25519");
+
+    generate_ed25519(&private_path, None, false).expect("生成应成功");
+
+    let probe = keys_dir.join("probe.txt");
+    std::fs::write(&probe, "ok").expect("在收紧后的目录里新建文件应成功");
+    let content = std::fs::read_to_string(&probe).expect("新建的文件应可读");
+    assert_eq!(content, "ok");
+}
+
 /// Windows 上私钥的 ACL 必须被收紧。
 ///
 /// 否则会有两个问题：
@@ -264,5 +285,90 @@ fn windows_下私钥_acl_被收紧到仅管理员与系统() {
             && !text.contains("BUILTIN\\Users")
             && !text.contains("-1-5-32-545"),
         "不应把私钥开放给普通用户：\n{text}"
+    );
+}
+
+// ------------------------------------------------------- 公钥推导 / 私钥识别
+
+#[test]
+fn 从私钥推导出的公钥与_pub_文件一致() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519");
+
+    let pair = generate_ed25519(&private_path, Some("atlas"), false).expect("生成应成功");
+    let derived = atlas_sftp::keygen::derive_public_key(&private_path).expect("应能推导公钥");
+
+    assert_eq!(
+        derived,
+        pair.public_key.trim_end_matches(" atlas"),
+        "推导出的公钥应与 .pub 文件内容一致（去掉注释）"
+    );
+    assert!(
+        derived.starts_with("ssh-ed25519 "),
+        "应为 OpenSSH 公钥格式：{derived}"
+    );
+}
+
+#[test]
+fn 私钥文件缺失时推导公钥应报错() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let missing = dir.path().join("不存在");
+    assert!(
+        atlas_sftp::keygen::derive_public_key(&missing).is_err(),
+        "私钥不存在时应报错"
+    );
+}
+
+#[test]
+fn 能识别出带_pem_头的私钥() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519");
+    generate_ed25519(&private_path, None, false).expect("生成应成功");
+    let pem = std::fs::read_to_string(&private_path).expect("读取私钥失败");
+
+    assert!(
+        atlas_sftp::keygen::contains_private_key(&pem),
+        "完整私钥应被识别出来"
+    );
+}
+
+#[test]
+fn 能识别出只有_base64_正文的私钥() {
+    // OpenSSH 私钥正文按 70 字符换行——70 不是 4 的倍数，
+    // 所以必须把整段拼接起来才能解码并识别。
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519");
+    generate_ed25519(&private_path, None, false).expect("生成应成功");
+    let pem = std::fs::read_to_string(&private_path).expect("读取私钥失败");
+
+    // 剥掉 BEGIN/END 头，只留 base64 正文。
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        atlas_sftp::keygen::contains_private_key(&body),
+        "只有 base64 正文的私钥也应被识别出来"
+    );
+}
+
+#[test]
+fn 正常的公钥不会被误判为私钥() {
+    let dir = tempfile::tempdir().expect("创建临时目录失败");
+    let private_path = dir.path().join("id_ed25519");
+    let pair = generate_ed25519(&private_path, Some("atlas"), false).expect("生成应成功");
+
+    assert!(
+        !atlas_sftp::keygen::contains_private_key(&pair.public_key),
+        "公钥不应被误判为私钥：{}",
+        pair.public_key
+    );
+    assert!(
+        !atlas_sftp::keygen::contains_private_key(
+            "127.0.0.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI atlas\n"
+        ),
+        "known_hosts 条目不应被误判为私钥"
     );
 }
