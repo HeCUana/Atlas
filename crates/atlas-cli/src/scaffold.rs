@@ -25,6 +25,8 @@ pub struct Scaffold {
     pub created_dirs: Vec<PathBuf>,
     /// 本次新建的服务器根目录。
     pub created_servers_dir: Option<PathBuf>,
+    /// 本次新建的密钥目录。
+    pub created_keys_dir: Option<PathBuf>,
 }
 
 impl Scaffold {
@@ -36,6 +38,9 @@ impl Scaffold {
         }
         if let Some(path) = &self.created_servers_dir {
             lines.push(format!("已创建服务器根目录: {}", path.display()));
+        }
+        if let Some(path) = &self.created_keys_dir {
+            lines.push(format!("已创建密钥目录: {}", path.display()));
         }
         for dir in &self.created_dirs {
             lines.push(format!("已创建目录: {}", dir.display()));
@@ -90,22 +95,33 @@ pub fn ensure_servers_dir() -> Result<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
+/// 确保密钥目录存在（存放 SSH 客户端私钥）。
+pub fn ensure_keys_dir() -> Result<Option<PathBuf>> {
+    let dir = PathBuf::from(AtlasConfig::DEFAULT_KEYS_DIR);
+    if dir.exists() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(&dir)?;
+    Ok(Some(dir))
+}
+
 /// 完整脚手架：配置 + 目录。
 ///
-/// `create_servers_dir` 为真时额外创建服务器根目录（`atlas init` 用）。
+/// `create_base_dirs` 为真时额外创建服务器根目录与密钥目录（`atlas init` 用）。
 pub fn scaffold(
     config_path: &Path,
     config: &AtlasConfig,
     force: bool,
-    create_servers_dir: bool,
+    create_base_dirs: bool,
 ) -> Result<Scaffold> {
     let mut result = Scaffold {
         created_config: ensure_config(config_path, force)?,
         ..Scaffold::default()
     };
 
-    if create_servers_dir {
+    if create_base_dirs {
         result.created_servers_dir = ensure_servers_dir()?;
+        result.created_keys_dir = ensure_keys_dir()?;
     }
     result.created_dirs = ensure_dirs(config)?;
     Ok(result)

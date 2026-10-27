@@ -231,6 +231,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atlas-core",
+ "rand 0.10.3",
  "russh",
  "russh-sftp",
  "tempfile",

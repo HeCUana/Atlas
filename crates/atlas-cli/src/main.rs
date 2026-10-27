@@ -90,6 +90,18 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// 生成 SSH 客户端密钥对（用于 SFTP / 远程连接）。
+    Keygen {
+        /// 私钥输出路径。
+        #[arg(long, default_value = AtlasConfig::DEFAULT_KEY_PATH)]
+        path: PathBuf,
+        /// 覆盖已存在的私钥（会销毁旧凭据）。
+        #[arg(long)]
+        force: bool,
+        /// 公钥注释，便于在 authorized_keys 里辨认来源。
+        #[arg(long, default_value = "atlas")]
+        comment: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -325,6 +337,31 @@ async fn async_run(cli: Cli) -> Result<()> {
             println!(
                 "下一步：编辑 {} 添加服务器，然后用 `atlas start` 启动。",
                 cli.config.display()
+            );
+        }
+        Commands::Keygen {
+            path,
+            force,
+            comment,
+        } => {
+            let pair = atlas_sftp::generate_ed25519(&path, Some(&comment), force)?;
+            println!("已生成 SSH 客户端密钥对：");
+            println!("  私钥: {}", pair.private_path.display());
+            println!("  公钥: {}", pair.public_path.display());
+            println!("  指纹: {}", pair.fingerprint);
+            println!();
+            println!("下一步：把下面这行公钥追加到远端服务器的 ~/.ssh/authorized_keys：");
+            println!("  {}", pair.public_key);
+            println!();
+            println!("然后在 atlas.toml 的 [sftp] 段配置：");
+            println!("  key_path = \"{}\"", pair.private_path.display());
+            #[cfg(windows)]
+            println!(
+                "\n（Windows 提示：私钥文件继承所在目录的 ACL，请确认 {} 目录只对本人可写。）",
+                pair.private_path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             );
         }
     }

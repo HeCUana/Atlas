@@ -11,6 +11,7 @@ description = "Atlas 远程文件管理：通过 SFTP 管理所托管服务器�
 [dependencies]
 atlas-core.workspace = true
 anyhow.workspace = true
+rand.workspace = true
 tokio.workspace = true
 russh.workspace = true
 russh-sftp.workspace = true

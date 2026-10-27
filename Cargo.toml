@@ -52,6 +52,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # 解析
 regex = "1"
 
+# 随机数（SSH 密钥生成；rand 0.10 与 ssh-key 依赖的 rand_core 0.10 版本对齐）
+rand = "0.10"
+
 # TUI
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }

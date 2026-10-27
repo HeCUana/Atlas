@@ -7,6 +7,7 @@
 //! - [`client`]：SFTP 客户端（连接、列举、上传下载、删除、建目录）；
 //! - [`credentials`]：认证凭据，敏感字段在 `Debug` 中脱敏；
 //! - [`hostkey`]：SSH 主机密钥校验（known_hosts），防中间人攻击；
+//! - [`keygen`]：SSH 客户端密钥对生成（供 `atlas keygen` 使用）；
 //! - [`path`]：路径拼接与本地映射的**纯函数**，是本 crate 的测试主体。
 //!
 //! ## 选型约束
@@ -23,9 +24,11 @@
 pub mod client;
 pub mod credentials;
 pub mod hostkey;
+pub mod keygen;
 pub mod path;
 
 pub use client::{RemoteEntry, SftpClient, SftpConnectOptions};
 pub use credentials::SftpCredentials;
 pub use hostkey::{HostKeyDecision, KnownHostEntry, UnknownHostPolicy};
+pub use keygen::{KeyPair, generate_ed25519};
 pub use path::{human_size, is_hidden, join_remote, normalize_remote, sanitize_local_path};

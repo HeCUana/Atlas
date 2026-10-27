@@ -234,6 +234,12 @@ impl AtlasConfig {
     /// 新建服务器时把 `workdir` 放在这个目录下比较省心。
     pub const DEFAULT_SERVERS_DIR: &'static str = "servers";
 
+    /// 默认的**密钥目录**（存放 SSH 客户端私钥）。
+    pub const DEFAULT_KEYS_DIR: &'static str = "keys";
+
+    /// 默认的 **SSH 客户端私钥路径**（相对工作目录）。
+    pub const DEFAULT_KEY_PATH: &'static str = "keys/id_ed25519";
+
     /// 返回运行期**必须存在**的目录。
     ///
     /// 包含：
@@ -269,6 +275,15 @@ impl AtlasConfig {
             if !server.workdir.as_os_str().is_empty() {
                 dirs.push(server.workdir.clone());
             }
+        }
+
+        // SFTP 客户端私钥所在目录：私钥不存在时要报错，目录得先在。
+        if let Some(sftp) = &self.sftp
+            && let Some(key_path) = &sftp.key_path
+            && let Some(parent) = key_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            dirs.push(parent.to_path_buf());
         }
 
         dirs
@@ -322,6 +337,7 @@ impl AtlasConfig {
              # log_profiles = \"log-profiles.toml\"\n\
              \n\
              # ── SFTP 远程文件管理（可选） ────────────────────────────────\n\
+             # 客户端私钥用 `atlas keygen` 生成（默认落在 keys/id_ed25519）。\n\
              # [sftp]\n\
              # host = \"127.0.0.1\"\n\
              # port = 22\n\

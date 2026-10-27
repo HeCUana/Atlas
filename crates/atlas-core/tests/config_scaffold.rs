@@ -115,3 +115,48 @@ fn 空的插件目录不会被算作必需目录() {
     let dirs = config.required_dirs();
     assert!(!dirs.contains(&PathBuf::new()));
 }
+
+#[test]
+fn sftp_私钥所在目录属于必需目录() {
+    // 私钥文件不存在时连接必然失败，目录得先在。
+    let config = AtlasConfig {
+        sftp: Some(atlas_core::SftpConfig {
+            host: "10.0.0.5".into(),
+            port: 22,
+            username: "mc".into(),
+            password: None,
+            key_path: Some(PathBuf::from("keys/id_ed25519")),
+            root: None,
+        }),
+        ..Default::default()
+    };
+    let dirs = config.required_dirs();
+    assert!(
+        dirs.contains(&PathBuf::from("keys")),
+        "私钥目录应被包含，实际 {dirs:?}"
+    );
+}
+
+#[test]
+fn sftp_私钥在绝对路径时取其父目录() {
+    let config = AtlasConfig {
+        sftp: Some(atlas_core::SftpConfig {
+            host: "10.0.0.5".into(),
+            port: 22,
+            username: "mc".into(),
+            password: None,
+            key_path: Some(PathBuf::from("/etc/atlas/keys/id_ed25519")),
+            root: None,
+        }),
+        ..Default::default()
+    };
+    let dirs = config.required_dirs();
+    assert!(dirs.contains(&PathBuf::from("/etc/atlas/keys")));
+}
+
+#[test]
+fn 没有_sftp_配置时不引入密钥目录() {
+    let config = AtlasConfig::default();
+    let dirs = config.required_dirs();
+    assert!(!dirs.contains(&PathBuf::from("keys")));
+}

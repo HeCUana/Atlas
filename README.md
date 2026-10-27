@@ -114,7 +114,32 @@ $ atlas init
 
 相对路径一律以 **Atlas 进程的工作目录**为基准解析。
 
-### 2.3 运行方式
+### 2.3 SSH 客户端密钥（`atlas keygen`）
+
+Atlas 用 SSH 客户端密钥连接远端服务器做 SFTP 文件管理，配置文件里的 `key_path` 指向一个**本地私钥**。
+
+```console
+$ atlas keygen
+已生成 SSH 客户端密钥对：
+  私钥: keys/id_ed25519
+  公钥: keys/id_ed25519.pub
+  指纹: SHA256:kJA+fxo6/RpZE7iILwkzH4blLCRWqL7yT8N/AmTzGdg
+
+下一步：把下面这行公钥追加到远端服务器的 ~/.ssh/authorized_keys：
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL4IcFQ27/rFcMcd/814WLqvLfwlUnzw17CgoJDkohQz atlas
+
+然后在 atlas.toml 的 [sftp] 段配置：
+  key_path = "keys/id_ed25519"
+```
+
+**为什么不自动生成**：私钥是凭据，生成它属于安全敏感动作，不该在启动时悄悄发生；而且公钥无论如何都要人工装到远端的 `authorized_keys`，跑不掉那一步。所以这里是**显式命令**，由你决定何时生成。
+
+- 私钥为 OpenSSH 格式，与 `ssh-keygen` 生成的互相兼容；Unix 下权限收紧为 `0600`。
+- **Windows 上没有 POSIX 权限位**，私钥文件继承所在目录的 ACL——请确认 `keys/` 目录只对本人可写。
+- 已存在的私钥**不会被覆盖**（覆盖 = 销毁旧凭据），需要覆盖请显式加 `--force`。
+- `atlas init` 会创建 `keys/` 目录；配置里若填了 `[sftp] key_path`，其父目录也会被自动补建。
+
+### 2.4 运行方式
 
 `atlas start` 是**前台守护模式**：启动目标服务器后接管它们，按 `[服务器ID] ` 前缀实时输出各服务器的控制台行。
 
@@ -609,7 +634,8 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | 插件生命周期顺序 | 停止事件订阅 → 注销命令 → 释放句柄 → 卸载 → 加载新实例（已用 `PluginLifecycle` trait 建模并用 mock 验证调用序列） |
 | 终端命令返回信息的采集语义 | 基于日志行的**启发式提取**，带超时窗口；窗口内无输出返回 `None`，有输出返回 `Some(文本)`。结果不保证完整或权威 |
 | `ConsoleBridge` 的可测试性 | 抽取 `ConsoleSource` trait，`ManagedServer` 实现之，采集逻辑可用 mock 单测 |
-| 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`） |
+| 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、`keys/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`） |
+| SSH 客户端密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装到远端 `authorized_keys` |
 
 ### 12.2 仍待决策
 
