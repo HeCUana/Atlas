@@ -10,7 +10,9 @@
 //!
 //! - 配置文件不存在 → 自动写入 [`atlas_core::AtlasConfig::template_toml`] 生成的模板；
 //! - 配置里引用到的目录不存在 → 自动创建（幂等，已存在则跳过）；
-//! - `atlas init` 额外创建服务器根目录 `servers/`，并可用 `--force` 覆盖已有配置。
+//! - `atlas init` 额外创建服务器根目录 `servers/`、密钥目录 `keys/`，
+//!   以及 SFTP 服务端的授权公钥文件 `keys/authorized_keys`
+//!   （内容只有说明注释，**不含任何公钥**），并可用 `--force` 覆盖已有配置。
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +29,8 @@ pub struct Scaffold {
     pub created_servers_dir: Option<PathBuf>,
     /// 本次新建的密钥目录。
     pub created_keys_dir: Option<PathBuf>,
+    /// 本次新建的 SFTP 授权公钥文件。
+    pub created_authorized_keys: Option<PathBuf>,
 }
 
 impl Scaffold {
@@ -41,6 +45,9 @@ impl Scaffold {
         }
         if let Some(path) = &self.created_keys_dir {
             lines.push(format!("已创建密钥目录: {}", path.display()));
+        }
+        if let Some(path) = &self.created_authorized_keys {
+            lines.push(format!("已创建授权公钥文件: {}", path.display()));
         }
         for dir in &self.created_dirs {
             lines.push(format!("已创建目录: {}", dir.display()));
@@ -135,6 +142,22 @@ pub fn ensure_keys_dir() -> Result<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
+/// 确保 SFTP 服务端的授权公钥文件存在。
+///
+/// 路径取自配置里的 `[sftp_server] authorized_keys`。文件不存在时按模板新建
+/// （内容只有说明注释，不含任何公钥），已存在则原样保留。
+pub fn ensure_authorized_keys_file(config: &AtlasConfig) -> Result<Option<PathBuf>> {
+    let path = &config.sftp_server.authorized_keys;
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if atlas_sftp::server::ensure_authorized_keys(path)? {
+        Ok(Some(path.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
 /// 完整脚手架：配置 + 目录。
 ///
 /// `create_base_dirs` 为真时额外创建服务器根目录与密钥目录（`atlas init` 用）。
@@ -152,6 +175,7 @@ pub fn scaffold(
     if create_base_dirs {
         result.created_servers_dir = ensure_servers_dir()?;
         result.created_keys_dir = ensure_keys_dir()?;
+        result.created_authorized_keys = ensure_authorized_keys_file(config)?;
     }
     result.created_dirs = ensure_dirs(config)?;
     Ok(result)

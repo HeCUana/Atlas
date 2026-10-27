@@ -735,18 +735,21 @@ async fn async_run(cli: Cli) -> Result<()> {
                     cfg.host_key.display()
                 );
             }
-            if !cfg.authorized_keys.exists() {
-                anyhow::bail!(
-                    "授权公钥文件不存在: {}\n\
-                     把远端电脑的公钥（形如 `ssh-ed25519 AAAA... 备注`）写进这个文件，一行一个。",
-                    cfg.authorized_keys.display()
-                );
-            }
+
+            // 授权公钥文件不存在就自动建一个（只含说明注释），
+            // 免得用户卡在「文件不存在」这一步还要自己去造文件。
+            let created_authorized =
+                atlas_sftp::server::ensure_authorized_keys(&cfg.authorized_keys)?;
+            let authorized_count =
+                atlas_sftp::server::load_authorized_keys(&cfg.authorized_keys)?.len();
 
             println!("SFTP 服务端启动中……");
             println!("  监听:      {}:{}", cfg.listen, cfg.port);
             println!("  主机私钥:  {}", cfg.host_key.display());
             println!("  授权公钥:  {}", cfg.authorized_keys.display());
+            if created_authorized {
+                println!("              ↳ 已自动创建该文件（目前只有说明注释，没有公钥）");
+            }
             println!("  共享目录:");
             for share in &shares {
                 println!(
@@ -761,7 +764,18 @@ async fn async_run(cli: Cli) -> Result<()> {
                 "远端用 SFTP 客户端连接：sftp://<用户名>@<Atlas主机>:{}",
                 cfg.port
             );
-            println!("（客户端只接受公钥认证；把客户端的公钥写进上面的授权公钥文件）");
+            if authorized_count == 0 {
+                println!("（客户端只接受公钥认证）");
+                println!();
+                println!("⚠️  授权公钥文件里还没有任何公钥 —— 现在谁也连不上。");
+                println!("    把远端电脑的客户端公钥（形如 `ssh-ed25519 AAAA... 备注`）");
+                println!("    写进上面那个文件，一行一个，然后重启本服务。");
+            } else {
+                println!(
+                    "（客户端只接受公钥认证；已授权 {} 个客户端公钥）",
+                    authorized_count
+                );
+            }
 
             let options = atlas_sftp::server::SftpServerOptions {
                 listen: cfg.listen.clone(),
@@ -1233,5 +1247,43 @@ mod tests {
         assert!(result.created_config.is_some());
         let content = std::fs::read_to_string(&config_path).expect("应能读取");
         assert!(content.contains("[data_source]"));
+    }
+
+    /// 构造一份把授权公钥指向临时目录的配置，避免污染工作区。
+    fn 授权公钥指向临时目录(tmp: &std::path::Path) -> AtlasConfig {
+        let mut config = AtlasConfig::default();
+        config.sftp_server.authorized_keys = tmp.join("keys").join("authorized_keys");
+        config
+    }
+
+    #[test]
+    fn 授权公钥文件不存在时脚手架会自动创建() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let config = 授权公钥指向临时目录(tmp.path());
+
+        let created = scaffold::ensure_authorized_keys_file(&config).expect("创建不应失败");
+
+        assert!(created.is_some(), "文件此前不存在，应报告已创建");
+        let path = &config.sftp_server.authorized_keys;
+        assert!(path.is_file(), "授权公钥文件应被建出来：{}", path.display());
+    }
+
+    #[test]
+    fn 授权公钥文件已存在时脚手架保持幂等且不覆盖() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let config = 授权公钥指向临时目录(tmp.path());
+        let path = config.sftp_server.authorized_keys.clone();
+        std::fs::create_dir_all(path.parent().expect("应有父目录")).expect("应能创建目录");
+        let original = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample 远端电脑\n";
+        std::fs::write(&path, original).expect("应能写入");
+
+        let created = scaffold::ensure_authorized_keys_file(&config).expect("创建不应失败");
+
+        assert!(created.is_none(), "文件已存在，不应报告创建");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("应能读取"),
+            original,
+            "已有内容必须原样保留"
+        );
     }
 }
