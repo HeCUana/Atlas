@@ -319,7 +319,59 @@ icacls "keys" /grant '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F'
 
 > 目录的授权**必须带 `(OI)(CI)`**（可继承）。`icacls /grant` 加的 ACE 默认只作用于该对象自身，目录不带继承标志的话，之后在目录里新建的文件会继承到**空 ACL**——文件存在却"访问被拒绝"。
 
-### 2.5 本机 SSH 服务端（`atlas sshd`）
+### 2.5 Atlas 作为 SFTP 服务端（`atlas serve`）
+
+这是与 `atlas sftp`（客户端）**方向相反**的能力：**Atlas 当服务端**，远端运维电脑用 SFTP 连进来，管理 Atlas 所托管的服务器的文件。
+
+```console
+$ atlas serve
+SFTP 服务端启动中……
+  监听:      0.0.0.0:2222
+  主机私钥:  keys/host_ed25519
+  授权公钥:  keys/authorized_keys
+  共享目录:
+    - survival         → servers/survival
+    - creative         → servers/creative
+
+远端用 SFTP 客户端连接：sftp://<用户名>@<Atlas主机>:2222
+```
+
+客户端看到的是一棵**虚拟树**，每个受管服务器一个顶层目录：
+
+```console
+$ sftp -P 2222 atlas@atlas-host
+sftp> ls
+creative  survival
+sftp> ls /survival
+/survival/README.txt      /survival/world/
+sftp> get /survival/world/level.dat ./level.dat
+```
+
+**准备步骤**：
+
+```bash
+# 1. 生成服务端主机密钥（远端客户端首次连接时校验的就是它）
+atlas keygen --path keys/host_ed25519
+
+# 2. 把远端电脑的**客户端公钥**写进 keys/authorized_keys（一行一个，形如
+#    `ssh-ed25519 AAAA... 备注`）
+
+# 3. 把配置里 [sftp_server] 的 enabled 改成 true
+```
+
+**安全边界**：
+
+- **只接受公钥认证**，口令认证一律拒绝；客户端公钥不在 `authorized_keys` 里就登不进来；
+- 客户端路径**必须落在共享目录之内**——`..` 无法越出，`ls /C:/Windows` 会被服务端拒绝；
+- 共享可标记只读（`read_only = true`），拒绝写入、删除、改名与建目录；
+- 端口默认 **2222** 而不是 22——避免和本机 OpenSSH 服务端抢端口；
+- 认证失败固定耗时（防时序探测）。
+
+> 共享目录默认从 `[[servers]]` 自动派生（服务器 `id` → 虚拟目录名，`workdir` → 真实目录）。要额外共享别的目录，用 `[[sftp_server.share]]`。
+>
+> `atlas serve` 与 `atlas start` 是**两个独立进程**：前者只提供文件通道（不启 Minecraft 服务端），后者只托管 Minecraft 服务端（不提供文件通道）。两者可以同时跑。
+
+### 2.6 本机 SSH 服务端（`atlas sshd`）
 
 SFTP 连本机时，前提是本机有 SSH 服务在跑。`atlas sshd` 负责这件事，并附带一份**就绪检查**：
 
@@ -378,7 +430,7 @@ $ atlas sshd status
 >
 > **私钥格式**：FileZilla 3.60+ 原生支持 OpenSSH 格式私钥（`-----BEGIN OPENSSH PRIVATE KEY-----`），无需转成 PuTTY 的 `.ppk`。
 
-### 2.6 运行方式
+### 2.7 运行方式
 
 `atlas start` 是**前台守护模式**：启动目标服务器后接管它们，按 `[服务器ID] ` 前缀实时输出各服务器的控制台行。
 

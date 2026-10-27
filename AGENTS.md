@@ -106,7 +106,7 @@ atlas-cli  →  atlas-core
 
 ### 4.7 SFTP 远程根目录
 
-- `[sftp] root` 决定会话的**起点**，同时也是**访问边界**：`..` 不能越出根。
+- `[sftp] root` 决定**客户端**会话的**起点**，同时也是**访问边界**：`..` 不能越出根。
 - 路径一律用 **SFTP 绝对 POSIX 形式**。Windows 路径要经 `to_absolute_remote`
   转换（`C:\Users\...` → `/C:/Users/...`）——与 sshd 返回的路径形式一致。
 - 路径解析必须走 `resolve_under_root`：
@@ -114,8 +114,21 @@ atlas-cli  →  atlas-core
   - **相对**输入拼在根之下。
   - 不要用「前导 `/` 一律忽略」的 chroot 语义——那会让「绝对路径」和
     「相对路径」无法区分，用户输 `/etc/passwd` 时得到的不是他以为的结果。
-- `atlas-sftp` 不得依赖 `atlas-core`（见 §2.1），配置类型由 `atlas-core` 提供、
-  路径语义由 `atlas-sftp` 提供。
+- `atlas-sftp` 可以依赖 `atlas-core`（配置类型、错误类型统一由 core 提供），
+  但**不得依赖其他内部 crate**（见 §2.1）；路径语义由 `atlas-sftp` 自己实现，
+  不要把路径规则下沉到 `atlas-core`。
+
+### 4.8 SFTP 服务端（Atlas 作为服务端）
+
+- 服务端把客户端看到的 POSIX 路径映射到**受管服务器的真实目录**，映射与越界防护
+  由 `atlas_sftp::server::VirtualFs` 负责，**不得**在 handler 里另写一套。
+- **读到文件末尾必须回 `StatusCode::Eof` 状态包，不能回空的 DATA 包。**
+  OpenSSH 客户端不把空 DATA 当作结束，会以同一个 offset 无限重复请求——
+  下载卡死，服务端 CPU 还会被烧满（实测 3 秒涨 2.7 秒）。
+- 服务端**只接受公钥认证**；认证失败要走固定耗时，避免时序探测。
+- 服务端主机密钥与客户端授权公钥是**两把不同的钥匙**：
+  主机密钥放 `keys/host_ed25519`，客户端公钥放 `keys/authorized_keys`。
+  不要把主机私钥当成客户端密钥用。
 
 ## 5. 测试要求
 
