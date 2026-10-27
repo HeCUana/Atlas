@@ -53,6 +53,8 @@ listen = "0.0.0.0"
 port = 2222
 host_key = "keys/host_ed25519"
 authorized_keys = "keys/authorized_keys"
+# authorized_keys 不用自己建：atlas init 会生成它，atlas serve 发现缺失时也会自动建。
+# 自动建出来的文件只有说明注释、不含公钥，所以在你贴进公钥之前谁都连不上。
 
 # 额外的共享目录（[[servers]] 派生之外的补充）
 # [[sftp_server.share]]

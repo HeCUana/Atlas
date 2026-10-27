@@ -446,6 +446,8 @@ impl AtlasConfig {
              # port = 2222\n\
              # host_key = \"keys/host_ed25519\"        # `atlas keygen --path keys/host_ed25519`\n\
              # authorized_keys = \"keys/authorized_keys\"  # 客户端的公钥，一行一个\n\
+             #   —— 文件不用自己建：atlas init 会生成它，atlas serve 发现缺失时也会自动建。\n\
+             #      自动建出来的文件只有说明注释、不含公钥，所以暂时谁都连不上。\n\
              \n\
              # ── SFTP 远程文件管理（可选） ────────────────────────────────\n\
              # 客户端私钥用 `atlas keygen` 生成（默认落在 keys/id_ed25519）。\n\
