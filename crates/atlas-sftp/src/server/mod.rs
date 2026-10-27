@@ -22,6 +22,13 @@
 //!
 //! 客户端路径先做**词法**规整（`.` 丢弃、`..` 回退），`..` 不能弹出虚拟根；
 //! 落到真实路径后，路径必定在对应 share 的目录之内。
+//!
+//! ## 授权公钥
+//!
+//! 服务端只接受公钥认证。授权名单放在 `authorized_keys` 格式的文件里
+//! （一行一个 `ssh-ed25519 AAAA... 备注`），路径由配置给出。
+//! 文件不存在时由 [`ensure_authorized_keys`] 自动创建——内容**只有说明注释**，
+//! 不含任何公钥，因此不会有客户端能连上，直到用户自己把公钥贴进去。
 
 pub mod handler;
 pub mod session;
@@ -31,7 +38,10 @@ use std::path::{Path, PathBuf};
 use atlas_core::{AtlasError, Result};
 
 pub use handler::SftpHandler;
-pub use session::{SftpServer, SftpServerOptions};
+pub use session::{
+    AUTHORIZED_KEYS_TEMPLATE, SftpServer, SftpServerOptions, ensure_authorized_keys,
+    load_authorized_keys,
+};
 
 /// 一个共享目录：客户端看到的虚拟名 ↔ 本机真实目录。
 #[derive(Debug, Clone, PartialEq, Eq)]

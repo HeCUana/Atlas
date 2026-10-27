@@ -44,7 +44,8 @@ impl SftpServer {
     ///
     /// # 错误
     ///
-    /// 主机私钥缺失/损坏、授权公钥文件缺失时返回 [`atlas_core::AtlasError`]。
+    /// 主机私钥缺失/损坏时返回 [`atlas_core::AtlasError`]。
+    /// 授权公钥文件缺失时会被自动创建（见 [`ensure_authorized_keys`]）。
     pub async fn run(self) -> atlas_core::Result<()> {
         let options = self.options;
 
@@ -62,8 +63,16 @@ impl SftpServer {
             ))
         })?;
 
-        // 授权公钥：按指纹建白名单。
+        // 授权公钥：按指纹建白名单。文件不存在时自动建一个空白的，
+        // 免得调用方先得手工造一个文件才能起服务。
+        ensure_authorized_keys(&options.authorized_keys)?;
         let authorized = load_authorized_keys(&options.authorized_keys)?;
+        if authorized.is_empty() {
+            tracing::warn!(
+                path = %options.authorized_keys.display(),
+                "授权公钥文件里没有可用的公钥，当前不会有任何客户端能连上"
+            );
+        }
 
         let fs = VirtualFs::with_shares(options.shares.clone());
         let config = Arc::new(russh::server::Config {
@@ -87,6 +96,55 @@ impl SftpServer {
             .await
             .map_err(|e| atlas_core::AtlasError::Sftp(format!("SFTP 服务端异常退出: {e}")))
     }
+}
+
+/// 授权公钥文件的模板内容。
+///
+/// 首次创建时写入，**只含注释**——文件里没有任何公钥时，所有客户端认证都会被拒绝。
+/// 这是刻意的：自动生成的授权名单等于「谁都能进」，那比一个都进不去危险得多。
+pub const AUTHORIZED_KEYS_TEMPLATE: &str = "\
+# Atlas SFTP 服务端的授权公钥文件（authorized_keys 格式）
+#
+# 每行一个客户端**公钥**，形如：
+#   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... 远端电脑备注
+#
+# 怎么拿到客户端公钥：
+#   · 远端电脑上已有 ~/.ssh/id_ed25519.pub —— 把 .pub 文件的内容整行复制过来；
+#   · 或者用 Atlas 生成一把：atlas keygen --path keys/client_ed25519
+#     （命令输出里的公钥行就是可以贴进来的内容）。
+#
+# 注意：
+#   · 这里只放**公钥**（ssh- 开头）。私钥误放进这个文件既无法通过认证，
+#     也等于凭据泄漏——曾经误放的私钥要视为已泄漏并重新生成；
+#   · 改完需要重启 `atlas serve` 才会生效（授权名单在启动时读入）；
+#   · 只有注释行不算公钥：这个文件若没有可用的公钥，谁都连不上。
+";
+
+/// 确保授权公钥文件存在。
+///
+/// 文件不存在时按 [`AUTHORIZED_KEYS_TEMPLATE`] 新建（父目录一并创建），
+/// 返回 `true`；文件已存在时**原样保留**并返回 `false`。
+///
+/// 刻意不覆盖已有文件：这个文件由用户维护（贴公钥进去），
+/// 自动生成逻辑一旦覆盖就会把授权名单清空。
+pub fn ensure_authorized_keys(path: &std::path::Path) -> atlas_core::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            atlas_core::AtlasError::Sftp(format!("创建授权公钥目录 {} 失败: {e}", parent.display()))
+        })?;
+    }
+
+    std::fs::write(path, AUTHORIZED_KEYS_TEMPLATE).map_err(|e| {
+        atlas_core::AtlasError::Sftp(format!("创建授权公钥文件 {} 失败: {e}", path.display()))
+    })?;
+    Ok(true)
 }
 
 /// 读取授权公钥文件，返回它们的 SHA256 指纹集合。
@@ -227,5 +285,83 @@ impl russh::server::Handler for SshSession {
         let handler = SftpHandler::new(self.fs.clone());
         russh_sftp::server::run(channel.into_stream(), handler).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 授权公钥文件不存在时会被自动创建() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let path = tmp.path().join("keys").join("authorized_keys");
+
+        let created = ensure_authorized_keys(&path).expect("创建不应失败");
+
+        assert!(created, "文件此前不存在，应报告已创建");
+        assert!(path.is_file(), "授权公钥文件应被建出来");
+        // 父目录也要一并建出来。
+        assert!(path.parent().expect("应有父目录").is_dir());
+    }
+
+    #[test]
+    fn 自动创建的内容只是注释_没有公钥() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let path = tmp.path().join("authorized_keys");
+
+        ensure_authorized_keys(&path).expect("创建不应失败");
+
+        let text = std::fs::read_to_string(&path).expect("应能读取");
+        assert!(
+            text.contains("authorized_keys"),
+            "模板应说明文件用途，实际：{text}"
+        );
+        // 关键安全属性：新文件里不能有任何一行能被当成公钥。
+        let authorized = load_authorized_keys(&path).expect("解析不应失败");
+        assert!(
+            authorized.is_empty(),
+            "新建的授权名单必须为空（谁都连不上），实际：{authorized:?}"
+        );
+    }
+
+    #[test]
+    fn 已存在的授权公钥文件不会被覆盖() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let path = tmp.path().join("authorized_keys");
+        let original = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample 远端电脑\n";
+        std::fs::write(&path, original).expect("应能写入");
+
+        let created = ensure_authorized_keys(&path).expect("不应失败");
+
+        assert!(!created, "文件已存在，不应报告创建");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("应能读取"),
+            original,
+            "已有内容必须原样保留"
+        );
+    }
+
+    #[test]
+    fn 重复调用是幂等的() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let path = tmp.path().join("authorized_keys");
+
+        assert!(ensure_authorized_keys(&path).expect("不应失败"));
+        assert!(
+            !ensure_authorized_keys(&path).expect("不应失败"),
+            "第二次调用不应再报告创建"
+        );
+    }
+
+    #[test]
+    fn 注释与空行不算公钥() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let path = tmp.path().join("authorized_keys");
+        std::fs::write(&path, "# 一行注释\n\n   \n#ssh-ed25519 AAAA 注释里的不算\n")
+            .expect("应能写入");
+
+        let authorized = load_authorized_keys(&path).expect("解析不应失败");
+        assert!(authorized.is_empty(), "实际：{authorized:?}");
     }
 }
