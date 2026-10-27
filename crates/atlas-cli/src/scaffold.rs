@@ -34,7 +34,7 @@ impl Scaffold {
     pub fn summary(&self) -> String {
         let mut lines = Vec::new();
         if let Some(path) = &self.created_config {
-            lines.push(format!("已生成配置文件: {}", path.display()));
+            lines.push(format!("已写入配置文件: {}", path.display()));
         }
         if let Some(path) = &self.created_servers_dir {
             lines.push(format!("已创建服务器根目录: {}", path.display()));
@@ -52,13 +52,20 @@ impl Scaffold {
     }
 }
 
-/// 确保配置文件存在。
+/// 确保配置文件存在且结构是当前的。
 ///
-/// - 文件不存在 → 写入模板，返回 `Some(path)`；
-/// - 文件已存在且 `force` 为假 → 返回 `None`（不覆盖用户的配置）；
+/// - 文件不存在 → 写入完整模板，返回 `Some(path)`；
+/// - 文件已存在 → **不覆盖用户内容**，只补齐**缺失的段落**
+///   （老版本配置里没有 `[sftp_server]`，直接跑 `atlas serve` 会一头雾水）。
+///   补齐的段落用**默认值**（`enabled = false`），不会改变既有行为；
 /// - 文件已存在且 `force` 为真 → 用模板覆盖，返回 `Some(path)`。
 pub fn ensure_config(config_path: &Path, force: bool) -> Result<Option<PathBuf>> {
     if config_path.exists() && !force {
+        let text = std::fs::read_to_string(config_path)?;
+        if let Some(upgraded) = upgrade_existing(&text) {
+            std::fs::write(config_path, upgraded)?;
+            return Ok(Some(config_path.to_path_buf()));
+        }
         return Ok(None);
     }
 
@@ -70,6 +77,29 @@ pub fn ensure_config(config_path: &Path, force: bool) -> Result<Option<PathBuf>>
 
     std::fs::write(config_path, AtlasConfig::template_toml())?;
     Ok(Some(config_path.to_path_buf()))
+}
+
+/// 给已有配置补齐缺失的段落，返回 `None` 表示无需改动。
+fn upgrade_existing(text: &str) -> Option<String> {
+    let mut out = text.to_owned();
+    let mut changed = false;
+
+    if !out.contains("[sftp_server]") {
+        out.push_str(
+            "\n# ── SFTP 服务端（可选）────────────────────────────────────────\n\
+             # 启用后，远端电脑可以用 SFTP 连到 Atlas，管理上面这些服务器的目录。\n\
+             # 客户端看到的是虚拟路径 /<服务器ID>/...，共享目录自动从 [[servers]] 派生。\n\
+             [sftp_server]\n\
+             enabled = false\n\
+             listen = \"0.0.0.0\"\n\
+             port = 2222\n\
+             host_key = \"keys/host_ed25519\"\n\
+             authorized_keys = \"keys/authorized_keys\"\n",
+        );
+        changed = true;
+    }
+
+    changed.then_some(out)
 }
 
 /// 确保配置引用到的所有目录存在，返回本次新建的目录。

@@ -128,6 +128,8 @@ enum Commands {
         #[command(subcommand)]
         action: SshdAction,
     },
+    /// 启动 SFTP 服务端，让远端电脑通过 SFTP 管理 Atlas 托管的服务器文件。
+    Serve,
 }
 
 #[derive(Subcommand, Debug)]
@@ -693,6 +695,83 @@ async fn async_run(cli: Cli) -> Result<()> {
                 println!("客户端公钥已装入 {}", target.display());
             }
         },
+        Commands::Serve => {
+            let cfg = atlas.config.sftp_server.clone();
+            if !cfg.enabled {
+                anyhow::bail!(
+                    "配置里 [sftp_server] 还没启用。先编辑 {} 把 enabled 改成 true；\n\
+                     （`atlas init` 可以给旧配置补上这一段）",
+                    cli.config.display()
+                );
+            }
+
+            // 共享目录：先从 [[servers]] 派生（id → workdir），
+            // 再叠加 [[sftp_server.share]] 显式声明的。
+            let mut shares = Vec::new();
+            for server in &atlas.config.servers {
+                shares.push(atlas_sftp::server::SftpShare::new(
+                    &server.id,
+                    &server.workdir,
+                ));
+            }
+            for share in &cfg.shares {
+                shares.push(atlas_sftp::server::SftpShare {
+                    name: share.name.clone(),
+                    local_path: share.path.clone(),
+                    read_only: share.read_only,
+                });
+            }
+            if shares.is_empty() {
+                anyhow::bail!(
+                    "没有可共享的目录：配置里既没有 [[servers]]，也没有 [[sftp_server.share]]。"
+                );
+            }
+
+            if !cfg.host_key.exists() {
+                anyhow::bail!(
+                    "主机私钥不存在: {}\n\
+                     生成一把：atlas keygen --path {}",
+                    cfg.host_key.display(),
+                    cfg.host_key.display()
+                );
+            }
+            if !cfg.authorized_keys.exists() {
+                anyhow::bail!(
+                    "授权公钥文件不存在: {}\n\
+                     把远端电脑的公钥（形如 `ssh-ed25519 AAAA... 备注`）写进这个文件，一行一个。",
+                    cfg.authorized_keys.display()
+                );
+            }
+
+            println!("SFTP 服务端启动中……");
+            println!("  监听:      {}:{}", cfg.listen, cfg.port);
+            println!("  主机私钥:  {}", cfg.host_key.display());
+            println!("  授权公钥:  {}", cfg.authorized_keys.display());
+            println!("  共享目录:");
+            for share in &shares {
+                println!(
+                    "    - {:<16} → {}{}",
+                    share.name,
+                    share.local_path.display(),
+                    if share.read_only { "（只读）" } else { "" }
+                );
+            }
+            println!();
+            println!(
+                "远端用 SFTP 客户端连接：sftp://<用户名>@<Atlas主机>:{}",
+                cfg.port
+            );
+            println!("（客户端只接受公钥认证；把客户端的公钥写进上面的授权公钥文件）");
+
+            let options = atlas_sftp::server::SftpServerOptions {
+                listen: cfg.listen.clone(),
+                port: cfg.port,
+                host_key: cfg.host_key.clone(),
+                authorized_keys: cfg.authorized_keys.clone(),
+                shares,
+            };
+            atlas_sftp::server::SftpServer::new(options).run().await?;
+        }
     }
 
     Ok(())
@@ -1104,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn 脚手架是幂等的_不会覆盖已有配置() {
+    fn 脚手架不覆盖已有内容_但会补齐缺失段落() {
         let tmp = tempfile::tempdir().expect("应能创建临时目录");
         let config_path = tmp.path().join("atlas.toml");
         std::fs::write(&config_path, "# 我自己写的配置\n").expect("应能写入");
@@ -1112,10 +1191,33 @@ mod tests {
         let result = scaffold::scaffold(&config_path, &AtlasConfig::default(), false, false)
             .expect("脚手架不应失败");
 
-        assert!(result.created_config.is_none(), "已有配置不应被覆盖");
+        let content = std::fs::read_to_string(&config_path).expect("应能读取");
+        assert!(
+            content.starts_with("# 我自己写的配置\n"),
+            "用户原有内容必须保留，实际：{content}"
+        );
+        assert!(
+            content.contains("[sftp_server]"),
+            "缺失的段落应被补齐，实际：{content}"
+        );
+        assert!(result.created_config.is_some(), "补齐后应报告配置被改动");
+    }
+
+    #[test]
+    fn 脚手架对完整的已有配置是幂等的() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let config_path = tmp.path().join("atlas.toml");
+        // 一份已经带 [sftp_server] 的配置——不该被再动一次。
+        let original = "# 我自己写的配置\n\n[sftp_server]\nenabled = false\n";
+        std::fs::write(&config_path, original).expect("应能写入");
+
+        let result = scaffold::scaffold(&config_path, &AtlasConfig::default(), false, false)
+            .expect("脚手架不应失败");
+
+        assert!(result.created_config.is_none(), "完整配置不应被改动");
         assert_eq!(
             std::fs::read_to_string(&config_path).expect("应能读取"),
-            "# 我自己写的配置\n"
+            original
         );
     }
 
