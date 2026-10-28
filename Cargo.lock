@@ -161,6 +161,7 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "russh",
  "serde",
  "serde_json",
  "tempfile",

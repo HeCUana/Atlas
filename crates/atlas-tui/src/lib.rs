@@ -11,6 +11,7 @@
 //!
 //! - [`app`]：界面状态（服务器列表、选中项、日志缓冲、输入缓冲）
 //! - [`event`]：按键 → [`AppAction`] 的映射
+//! - [`remote`]：远程渲染后端与按键解码（供 SSH 通道使用）
 //! - [`ui`]：把状态画成界面
 //!
 //! ## 终端状态恢复（职责分工）
@@ -28,6 +29,7 @@
 
 pub mod app;
 pub mod event;
+pub mod remote;
 pub mod ui;
 
 pub use app::{App, AppView, MAX_LOG_LINES, PAGE_SIZE, ServerRow};

@@ -14,6 +14,9 @@
 //! | `Tab` | 进入当前选中服务器的控制台 |
 //! | `↑` / `↓` | 上下移动选中项（首尾环绕） |
 //! | `k` / `j` | 同上（vim 风格），仅在输入框为空时生效 |
+//! | `s` | **启动**选中服务器（仅总览视图、输入框为空时生效） |
+//! | `x` | **停止**选中服务器（同上） |
+//! | `r` | **重启**选中服务器（同上） |
 //! | `PageUp` / `PageDown` | 翻页移动选中项（每次 [`crate::app::PAGE_SIZE`] 行） |
 //! | `Home` / `End` | 跳到首行 / 末行 |
 //! | `Enter` | 提交输入行，返回 [`AppAction::Submit`] |
@@ -21,13 +24,16 @@
 //! | `Ctrl+U` | 清空输入行 |
 //! | 其它字符 | 追加到输入行（不会被吞掉） |
 //!
-//! ## `q` / `j` / `k` 的歧义处理
+//! ## `q` / `j` / `k` / `s` / `x` / `r` 的歧义处理
 //!
-//! 这三个键既是命令键又是普通字符。为了既不误退出、也不吞掉正在输入的命令，
+//! 这些键既是命令键又是普通字符。为了既不误退出、也不吞掉正在输入的命令，
 //! 它们**只在输入框为空时**才作为命令键生效；输入框非空时一律作为普通字符输入。
-//! 因此若要输入以 `q` / `j` / `k` 开头的命令，请先敲一个空格再输入。
+//! 因此若要输入以 `q` / `j` / `k` / `s` / `x` / `r` 开头的命令，请先敲一个空格再输入。
+//!
+//! `s` / `x` / `r` 还额外要求当前处于**总览视图**：控制台视图里输入框的内容是
+//! 发给服务端控制台的命令文本，`s` 在那里就应当是命令的一部分，而不是开关服。
 
-use atlas_core::LogLevel;
+use atlas_core::{LogLevel, ServerId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, AppView};
@@ -45,6 +51,12 @@ pub enum AppAction {
     Move(isize),
     /// 执行输入框中的命令。
     Submit,
+    /// 启动指定服务器。
+    StartServer(ServerId),
+    /// 停止指定服务器。
+    StopServer(ServerId),
+    /// 重启指定服务器。
+    RestartServer(ServerId),
 }
 
 /// 处理一次按键，返回触发的动作。
@@ -70,6 +82,35 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
         KeyCode::Char('j') if !ctrl && app.input.is_empty() => {
             app.move_selection(1);
             AppAction::Move(1)
+        }
+        // 开关服：只在**总览视图**且输入框为空时生效。
+        // 控制台视图里的 s/x/r 属于发给服务端控制台的命令文本，不能被截走。
+        KeyCode::Char('s') if !ctrl && app.input.is_empty() && app.view == AppView::Dashboard => {
+            match app.selected_server_id() {
+                Some(id) => AppAction::StartServer(id),
+                None => {
+                    app.status = Some("没有可启动的服务器".to_owned());
+                    AppAction::None
+                }
+            }
+        }
+        KeyCode::Char('x') if !ctrl && app.input.is_empty() && app.view == AppView::Dashboard => {
+            match app.selected_server_id() {
+                Some(id) => AppAction::StopServer(id),
+                None => {
+                    app.status = Some("没有可停止的服务器".to_owned());
+                    AppAction::None
+                }
+            }
+        }
+        KeyCode::Char('r') if !ctrl && app.input.is_empty() && app.view == AppView::Dashboard => {
+            match app.selected_server_id() {
+                Some(id) => AppAction::RestartServer(id),
+                None => {
+                    app.status = Some("没有可重启的服务器".to_owned());
+                    AppAction::None
+                }
+            }
         }
         KeyCode::Esc => {
             if app.view != AppView::Dashboard {
@@ -213,6 +254,69 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Esc));
         assert!(app.input.is_empty());
         assert_eq!(app.view, AppView::Dashboard);
+    }
+
+    #[test]
+    fn 总览视图下_s_触发启动() {
+        let mut app = app_with_servers(&["a", "b"]);
+        app.move_selection(1);
+        let action = handle_key(&mut app, char_key('s'));
+        assert_eq!(action, AppAction::StartServer("srv1".into()));
+    }
+
+    #[test]
+    fn 总览视图下_x_触发停止() {
+        let mut app = app_with_servers(&["a"]);
+        let action = handle_key(&mut app, char_key('x'));
+        assert_eq!(action, AppAction::StopServer("srv0".into()));
+    }
+
+    #[test]
+    fn 总览视图下_r_触发重启() {
+        let mut app = app_with_servers(&["a"]);
+        let action = handle_key(&mut app, char_key('r'));
+        assert_eq!(action, AppAction::RestartServer("srv0".into()));
+    }
+
+    #[test]
+    fn 输入框非空时_sxr_只是普通字符() {
+        let mut app = app_with_servers(&["a"]);
+        app.push_input('l');
+        for ch in ['s', 'x', 'r'] {
+            let action = handle_key(&mut app, char_key(ch));
+            assert_eq!(action, AppAction::None, "{ch} 不应触发开关服");
+        }
+        assert_eq!(app.input, "lsxr");
+    }
+
+    #[test]
+    fn 控制台视图下_sxr_只是普通字符() {
+        let mut app = app_with_servers(&["a"]);
+        app.enter_console();
+        for ch in ['s', 'x', 'r'] {
+            let action = handle_key(&mut app, char_key(ch));
+            assert_eq!(action, AppAction::None, "{ch} 不应触发开关服");
+        }
+        assert_eq!(app.input, "sxr");
+    }
+
+    #[test]
+    fn 没有服务器时开关服给出提示而不是动作() {
+        let mut app = app_with_servers(&[]);
+        let action = handle_key(&mut app, char_key('s'));
+        assert_eq!(action, AppAction::None);
+        assert!(
+            app.status.as_deref().is_some_and(|s| s.contains("没有")),
+            "应提示没有可操作的服务器，实际：{:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn ctrl_s_不触发启动() {
+        let mut app = app_with_servers(&["a"]);
+        let action = handle_key(&mut app, ctrl(KeyCode::Char('s')));
+        assert_eq!(action, AppAction::None);
     }
 
     #[test]

@@ -19,7 +19,9 @@ pub mod perm;
 pub mod server;
 
 pub use command::{CommandInvocation, CommandOutcome, CommandSource, CommandSpec, CommandTree};
-pub use config::{AtlasConfig, DataSource, ServerConfig, SftpServerConfig, SftpShareConfig};
+pub use config::{
+    AtlasConfig, DataSource, RemoteConfig, ServerConfig, SftpServerConfig, SftpShareConfig,
+};
 pub use error::{AtlasError, Result};
 pub use event::{CommandEvent, Event, EventBus, LogEvent, LogLevel, RecvOutcome, ServerStateEvent};
 pub use perm::{Action, Grant, PermissionSet, Resource, Subject};

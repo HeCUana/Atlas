@@ -144,6 +144,49 @@ fn default_sftp_server_listen() -> String {
     "0.0.0.0".to_owned()
 }
 
+/// 远程 TUI 配置。
+///
+/// Atlas 在**同一个进程**里托管 Minecraft 服务端，并通过 SSH 把 TUI 暴露给
+/// 远端运维电脑。远端 TUI 里的开关服操作作用在本进程托管的实例上——
+/// 这也是它必须与托管进程同体的原因：分成两个进程的话，远端按的「停止」
+/// 停的是另一个进程的实例，操作者看到的现象会与预期不符。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    /// 是否启用远程 TUI。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 监听地址。`0.0.0.0` 表示对外开放。
+    #[serde(default = "default_remote_listen")]
+    pub listen: String,
+    /// 监听端口。
+    ///
+    /// 默认 **2223**——与 SFTP 服务端的 2222 错开，两个能力可以并存。
+    #[serde(default = "default_remote_port")]
+    pub port: u16,
+    /// 主机私钥路径（OpenSSH 格式）。客户端首次连接时校验的就是这把钥匙。
+    #[serde(default = "default_remote_host_key")]
+    pub host_key: PathBuf,
+    /// 允许登录的公钥文件（authorized_keys 格式，一行一个 `ssh-ed25519 ...`）。
+    #[serde(default = "default_remote_authorized_keys")]
+    pub authorized_keys: PathBuf,
+}
+
+fn default_remote_listen() -> String {
+    "0.0.0.0".to_owned()
+}
+
+fn default_remote_port() -> u16 {
+    2223
+}
+
+fn default_remote_host_key() -> PathBuf {
+    PathBuf::from("keys/host_ed25519")
+}
+
+fn default_remote_authorized_keys() -> PathBuf {
+    PathBuf::from("keys/authorized_keys")
+}
+
 fn default_sftp_server_port() -> u16 {
     2222
 }
@@ -169,6 +212,18 @@ impl Default for SftpServerConfig {
     }
 }
 
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_remote_listen(),
+            port: default_remote_port(),
+            host_key: default_remote_host_key(),
+            authorized_keys: default_remote_authorized_keys(),
+        }
+    }
+}
+
 /// Atlas 全局配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtlasConfig {
@@ -181,6 +236,9 @@ pub struct AtlasConfig {
     /// SFTP 服务端配置（Atlas 作为**服务端**让别人连进来）。
     #[serde(default)]
     pub sftp_server: SftpServerConfig,
+    /// 远程 TUI 配置（Atlas 通过 SSH 把 TUI 暴露给远端运维电脑）。
+    #[serde(default)]
+    pub remote: RemoteConfig,
     /// 事件总线容量。
     #[serde(default = "default_event_capacity")]
     pub event_capacity: usize,
@@ -206,6 +264,7 @@ impl Default for AtlasConfig {
             servers: Vec::new(),
             data_source: DataSource::default(),
             sftp_server: SftpServerConfig::default(),
+            remote: RemoteConfig::default(),
             event_capacity: default_event_capacity(),
             plugin_dir: default_plugin_dir(),
             log_profiles: None,
@@ -373,7 +432,18 @@ impl AtlasConfig {
              # host_key = \"keys/host_ed25519\"        # `atlas keygen --path keys/host_ed25519`\n\
              # authorized_keys = \"keys/authorized_keys\"  # 客户端的公钥，一行一个\n\
              #   —— 文件不用自己建：atlas init 会生成它，atlas serve 发现缺失时也会自动建。\n\
-             #      自动建出来的文件只有说明注释、不含公钥，所以暂时谁都连不上。\n",
+             #      自动建出来的文件只有说明注释、不含公钥，所以暂时谁都连不上。\n\
+             \n\
+             # ── 远程 TUI（可选） ────────────────────────────────────────\n\
+             # 启用后，远端电脑用 `ssh -p <端口> atlas@<主机> -s atlas-tui` 连进来，\n\
+             # 就能在浏览器以外的终端里操作 Atlas 的 TUI（开关服、看日志、投命令）。\n\
+             # 与 SFTP 服务端共用同一把主机密钥与同一份授权名单。\n\
+             # [remote]\n\
+             # enabled = true\n\
+             # listen = \"0.0.0.0\"\n\
+             # port = 2223\n\
+             # host_key = \"keys/host_ed25519\"\n\
+             # authorized_keys = \"keys/authorized_keys\"\n",
         );
         out
     }

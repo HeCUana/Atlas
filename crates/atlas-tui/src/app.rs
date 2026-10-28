@@ -96,6 +96,7 @@ impl App {
     /// - [`Event::Log`]：入队日志缓冲，超过 [`MAX_LOG_LINES`] 时淘汰最旧的一条。
     /// - [`Event::ServerState`]：更新对应服务器的运行状态（找不到则忽略）。
     /// - [`Event::Command`]：把命令执行信息写入状态栏。
+    /// - [`Event::Status`]：把提示原文写入状态栏。
     pub fn handle_event(&mut self, event: Event) {
         match event {
             Event::Log(log) => {
@@ -110,7 +111,15 @@ impl App {
                 }
             }
             Event::Command(cmd) => {
-                self.status = Some(format!("{} → {}", cmd.actor, cmd.command));
+                self.status = Some(match cmd.output.as_deref() {
+                    // 有返回信息时直接显示它——运维想看的是命令**结果**，
+                    // 不是命令本身。没有结果才退回显示「谁执行了什么」。
+                    Some(output) if !output.is_empty() => format!("{} → {output}", cmd.server),
+                    _ => format!("{} → {}", cmd.actor, cmd.command),
+                });
+            }
+            Event::Status { text, .. } => {
+                self.status = Some(text);
             }
         }
     }
@@ -120,6 +129,30 @@ impl App {
     /// 列表为空（或下标越界）时返回 `None`。
     pub fn selected_server(&self) -> Option<&ServerRow> {
         self.servers.get(self.selected)
+    }
+
+    /// 当前选中的服务器 ID。
+    ///
+    /// 列表为空（或下标越界）时返回 `None`。
+    ///
+    /// 开关服动作需要把目标 ID 带给调用方（`atlas-cli`），而在异步处理里
+    /// 选中项随时可能变，因此动作里带的是**按下那一刻**的 ID，而不是让
+    /// 调用方事后再去查。
+    pub fn selected_server_id(&self) -> Option<ServerId> {
+        self.servers.get(self.selected).map(|r| r.id.clone())
+    }
+
+    /// 用给定的状态初始化服务器列表的运行状态。
+    ///
+    /// 事件总线上的状态变化是**瞬时**的——后连上来的会话收不到之前的变更。
+    /// 远程会话据此还原「我连上来时服务器已经在跑」这件事；
+    /// 否则界面会把所有服务器都显示成"已停止"，操作者会据此做出错误判断。
+    pub fn seed_states(&mut self, states: &[(ServerId, ServerState)]) {
+        for row in &mut self.servers {
+            if let Some((_, state)) = states.iter().find(|(id, _)| *id == row.id) {
+                row.state = *state;
+            }
+        }
     }
 
     /// 移动选中项。

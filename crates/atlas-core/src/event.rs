@@ -138,6 +138,17 @@ pub enum Event {
     Command(CommandEvent),
     /// 服务器状态事件。
     ServerState(ServerStateEvent),
+    /// 一条状态提示（面向界面的纯文本消息）。
+    ///
+    /// 「已启动 survival」「服务器 x 未运行」这类信息没有结构化负载，
+    /// 用纯文本事件比硬塞进 [`CommandEvent`] 更诚实——后者描述的是
+    /// "在游戏里执行了一条命令"，而开关服不是这类操作。
+    Status {
+        /// 提示所属的服务器。
+        server: ServerId,
+        /// 提示正文。
+        text: String,
+    },
 }
 
 impl Event {
@@ -147,6 +158,7 @@ impl Event {
             Self::Log(e) => &e.server,
             Self::Command(e) => &e.server,
             Self::ServerState(e) => &e.server,
+            Self::Status { server, .. } => server,
         }
     }
 }

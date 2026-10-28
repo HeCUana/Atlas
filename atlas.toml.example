@@ -61,3 +61,19 @@ authorized_keys = "keys/authorized_keys"
 # name = "backups"
 # path = "D:/minecraft-backups"
 # read_only = true
+
+# 远程 TUI（可选）——远端电脑用 SSH 连进来操作 Atlas 的 TUI（含开关服）。
+# 与上面的 SFTP 服务端共用同一把主机密钥和同一份授权名单。
+# 启用步骤：
+#   1) atlas keygen --path keys/host_ed25519      # 服务端主机密钥
+#   2) 把远端电脑的客户端公钥写进 keys/authorized_keys（一行一个）
+#   3) 把下面的 enabled 改成 true
+# 远端连接：ssh -tt -p 2223 <用户名>@<Atlas主机> atlas-tui
+[remote]
+enabled = false
+listen = "0.0.0.0"
+port = 2223
+host_key = "keys/host_ed25519"
+authorized_keys = "keys/authorized_keys"
+# 注意：远程 TUI 尚未接入权限校验，能连上就能开关服。
+# 只给可信网段用时，把 listen 改成 "127.0.0.1" 或受控网段地址。

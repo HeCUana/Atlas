@@ -102,7 +102,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         Block::default()
             .borders(Borders::ALL)
             .title("服务器")
-            .title_bottom("↑/↓ 选择 · Tab 控制台 · Esc 返回 · q 退出"),
+            .title_bottom("↑/↓ 选择 · Tab 控制台 · s 启动 · x 停止 · r 重启 · q 退出"),
     );
     frame.render_widget(list, area);
 }

@@ -23,6 +23,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -30,7 +31,9 @@ use atlas_core::{AtlasConfig, Event, EventBus, LogLevel, ServerId};
 use atlas_parser::LogParser;
 use atlas_server::{ConsoleBridge, Supervisor};
 use clap::{Parser, Subcommand};
+use russh::server::Server as _;
 
+mod remote;
 mod scaffold;
 mod sshd;
 
@@ -116,6 +119,8 @@ enum Commands {
     },
     /// 启动 SFTP 服务端，让远端电脑通过 SFTP 管理 Atlas 托管的服务器文件。
     Serve,
+    /// 启动远程 TUI：远端电脑用 SSH 连进来操作本进程托管的服务器。
+    Remote,
 }
 
 #[derive(Subcommand, Debug)]
@@ -610,6 +615,129 @@ async fn async_run(cli: Cli) -> Result<()> {
             };
             atlas_sftp::server::SftpServer::new(options).run().await?;
         }
+        Commands::Remote => {
+            let cfg = atlas.config.remote.clone();
+            if !cfg.enabled {
+                anyhow::bail!(
+                    "配置里 [remote] 还没启用。先编辑 {} 把 enabled 改成 true。",
+                    cli.config.display()
+                );
+            }
+
+            // 主机私钥：远端客户端首次连接时校验的就是它。
+            if !cfg.host_key.exists() {
+                anyhow::bail!(
+                    "主机私钥不存在: {}\n\
+                     生成一把：atlas keygen --path {}",
+                    cfg.host_key.display(),
+                    cfg.host_key.display()
+                );
+            }
+            let key_text = std::fs::read_to_string(&cfg.host_key)
+                .with_context(|| format!("读取主机私钥 {} 失败", cfg.host_key.display()))?;
+            let host_key = russh::keys::decode_secret_key(&key_text, None)
+                .with_context(|| format!("解析主机私钥 {} 失败", cfg.host_key.display()))?;
+
+            // 授权名单：与 SFTP 服务端共用同一份文件。
+            let authorized = remote::load_authorized_keys(&cfg.authorized_keys)?;
+
+            let (intent_tx, mut intent_rx) = tokio::sync::mpsc::channel::<remote::Intent>(64);
+            let shared = Arc::new(remote::Shared {
+                config: atlas.config.clone(),
+                bus: atlas.bus.clone(),
+                intents: intent_tx,
+                states: std::sync::RwLock::new(Vec::new()),
+            });
+
+            // SSH 服务端：与本进程同体，所以远端 TUI 里的开关服作用的就是
+            // 下面这份 Supervisor 托管的实例。
+            let mut server = remote::RemoteServer::new(shared.clone(), authorized.clone());
+            let ssh_config = Arc::new(russh::server::Config {
+                keys: vec![host_key],
+                // 拒绝时固定耗时，避免通过响应时间探测公钥是否存在。
+                auth_rejection_time: Duration::from_secs(3),
+                auth_rejection_time_initial: Some(Duration::from_secs(0)),
+                ..Default::default()
+            });
+            let listen = cfg.listen.clone();
+            let port = cfg.port;
+            tokio::spawn(async move {
+                if let Err(e) = server
+                    .run_on_address(ssh_config, (listen.as_str(), port))
+                    .await
+                {
+                    tracing::error!("远程 TUI 服务端异常退出: {e}");
+                }
+            });
+
+            // 托管标记了 auto_start 的服务器。
+            let targets = resolve_targets(&atlas.config, Vec::new(), true);
+            for id in &targets {
+                atlas.supervisor.start(id).await?;
+            }
+            let _pumps = atlas.spawn_log_pumps(false);
+
+            println!("远程 TUI 已启动：");
+            println!("  监听:      {}:{}", cfg.listen, cfg.port);
+            println!("  主机私钥:  {}", cfg.host_key.display());
+            println!("  授权公钥:  {}", cfg.authorized_keys.display());
+            println!("  已授权:    {} 个客户端公钥", authorized.len());
+            println!("  已托管:    {} 台服务器", targets.len());
+            println!();
+            println!("远端连接（分配一个终端窗口即可看到界面）：");
+            println!(
+                "  ssh -tt -p {} <用户名>@<Atlas主机> {}",
+                cfg.port,
+                remote::TUI_COMMAND
+            );
+            println!("  界面里按 s 启动 / x 停止 / r 重启选中的服务器。");
+            if authorized.is_empty() {
+                println!();
+                println!("⚠️  授权公钥文件里没有可用公钥 —— 现在谁都连不上。",);
+                println!(
+                    "    把远端电脑的客户端公钥写进 {}，一行一个，然后重启本服务。",
+                    cfg.authorized_keys.display()
+                );
+            }
+            println!();
+            println!("（Ctrl+C 将优雅停止全部服务器）");
+
+            // 主循环：执行会话意图 + 崩溃探测 + 等待 Ctrl+C。
+            let ctrl_c = tokio::signal::ctrl_c();
+            tokio::pin!(ctrl_c);
+            let mut ticker = tokio::time::interval(Duration::from_secs(2));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    intent = intent_rx.recv() => {
+                        let Some(intent) = intent else { break };
+                        apply_intent(&mut atlas, intent).await;
+                        refresh_state_snapshot(&atlas, &shared);
+                    }
+                    result = &mut ctrl_c => {
+                        if let Err(e) = result {
+                            tracing::warn!("监听 Ctrl+C 失败: {e}");
+                        }
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        for (id, state) in atlas.supervisor.poll_changes() {
+                            eprintln!("[{id}] 进程已退出，当前状态：{state}");
+                        }
+                        refresh_state_snapshot(&atlas, &shared);
+                    }
+                }
+            }
+
+            println!();
+            println!("正在停止所有服务器…");
+            let errors = atlas.supervisor.stop_all().await;
+            for (id, e) in errors {
+                eprintln!("停止 {id} 失败: {e}");
+            }
+            println!("全部服务器已停止。");
+        }
     }
 
     Ok(())
@@ -791,6 +919,24 @@ async fn tui_loop(
                             dispatch_command(app, atlas, &line).await;
                         }
                     }
+                    AppAction::StartServer(id) => {
+                        match atlas.supervisor.start(id.as_str()).await {
+                            Ok(()) => app.status = Some(format!("已启动 {id}")),
+                            Err(e) => app.status = Some(format!("启动 {id} 失败: {e}")),
+                        }
+                    }
+                    AppAction::StopServer(id) => {
+                        match atlas.supervisor.stop(id.as_str()).await {
+                            Ok(()) => app.status = Some(format!("已停止 {id}")),
+                            Err(e) => app.status = Some(format!("停止 {id} 失败: {e}")),
+                        }
+                    }
+                    AppAction::RestartServer(id) => {
+                        match atlas.supervisor.restart(id.as_str()).await {
+                            Ok(()) => app.status = Some(format!("已重启 {id}")),
+                            Err(e) => app.status = Some(format!("重启 {id} 失败: {e}")),
+                        }
+                    }
                     AppAction::ToggleView | AppAction::Move(_) | AppAction::None => {}
                 }
             }
@@ -806,6 +952,53 @@ async fn tui_loop(
         }
     }
     Ok(())
+}
+
+/// 执行一条来自远程 TUI 会话的意图。
+///
+/// 副作用都在这里发生——会话只负责表达意图，实际的开关服与命令执行
+/// 都发生在持有 Supervisor 的主循环里。结果通过事件总线回到会话的界面。
+async fn apply_intent(atlas: &mut Atlas, intent: remote::Intent) {
+    use remote::Intent;
+
+    tracing::debug!("执行意图: {intent:?}");
+    match intent {
+        Intent::Start(id) => match atlas.supervisor.start(&id).await {
+            Ok(()) => publish_status(&atlas.bus, &id, format!("已启动 {id}")),
+            Err(e) => publish_status(&atlas.bus, &id, format!("启动 {id} 失败: {e}")),
+        },
+        Intent::Stop(id) => match atlas.supervisor.stop(&id).await {
+            Ok(()) => publish_status(&atlas.bus, &id, format!("已停止 {id}")),
+            Err(e) => publish_status(&atlas.bus, &id, format!("停止 {id} 失败: {e}")),
+        },
+        Intent::Restart(id) => match atlas.supervisor.restart(&id).await {
+            Ok(()) => publish_status(&atlas.bus, &id, format!("已重启 {id}")),
+            Err(e) => publish_status(&atlas.bus, &id, format!("重启 {id} 失败: {e}")),
+        },
+        Intent::Execute { server, line } => {
+            remote::execute_command(&mut atlas.supervisor, &atlas.bus, &server, &line).await;
+        }
+    }
+}
+
+/// 把一条状态提示发布到事件总线，让远程会话的界面能看到。
+fn publish_status(bus: &EventBus, server: &str, text: String) {
+    let _ = bus.publish(Event::Status {
+        server: ServerId::new(server.to_owned()),
+        text: text.clone(),
+    });
+    tracing::info!("[{server}] {text}");
+}
+
+/// 刷新各服务器的当前状态快照。
+///
+/// 事件总线上的状态变化是瞬时的，后连上来的远程会话收不到——
+/// 它们靠这份快照还原「连上来时服务器已经在跑」。
+fn refresh_state_snapshot(atlas: &Atlas, shared: &Arc<remote::Shared>) {
+    let states = atlas.supervisor.states();
+    if let Ok(mut slot) = shared.states.write() {
+        *slot = states;
+    }
 }
 
 /// 把 TUI 中输入的命令投递给对应服务器的 stdin。
