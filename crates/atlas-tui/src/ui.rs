@@ -35,6 +35,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use crate::app::{App, AppView};
+use crate::theme::Theme;
 
 /// 输入提示符宽度（`"> "`）。
 const PROMPT_WIDTH: u16 = 2;
@@ -87,9 +88,9 @@ fn render_title(frame: &mut Frame, area: Rect, app: &App) {
                 "Atlas · 服务器总览".to_owned(),
                 format!("{running}/{total} 运行中"),
                 if running > 0 {
-                    Color::Green
+                    app.theme.running
                 } else {
-                    Color::DarkGray
+                    app.theme.muted
                 },
             )
         }
@@ -100,7 +101,7 @@ fn render_title(frame: &mut Frame, area: Rect, app: &App) {
                 .find(|r| r.id == *id)
                 .map(|r| r.state)
                 .unwrap_or(ServerState::Stopped);
-            let (_, color) = state_symbol(state);
+            let (_, color) = state_symbol(state, &app.theme);
             (
                 format!("Atlas · 控制台 {id}"),
                 state.label().to_owned(),
@@ -131,7 +132,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, app: &App) {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "  还没有配置任何服务器。在 atlas.toml 里加一段 [[servers]] 即可。",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.muted),
                 )),
                 inner,
             );
@@ -145,7 +146,7 @@ fn render_dashboard(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, row)| {
             let selected = i == app.selected;
-            let (symbol, color) = state_symbol(row.state);
+            let (symbol, color) = state_symbol(row.state, &app.theme);
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{symbol} "), Style::default().fg(color)),
                 Span::styled(
@@ -192,14 +193,14 @@ fn render_console(frame: &mut Frame, area: Rect, app: &mut App, id: &ServerId) {
         .iter()
         .map(|l| {
             let color = match l.level {
-                LogLevel::Warn => Color::Yellow,
-                LogLevel::Error | LogLevel::Fatal => Color::Red,
-                _ => Color::Gray,
+                LogLevel::Warn => app.theme.transitional,
+                LogLevel::Error | LogLevel::Fatal => app.theme.failed,
+                _ => app.theme.muted,
             };
             Line::from(vec![
                 Span::styled(
                     format!("[{}] ", l.timestamp.as_deref().unwrap_or("--:--:--")),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.muted),
                 ),
                 Span::styled(
                     format!("{:<5} ", l.level.as_str()),
@@ -217,7 +218,7 @@ fn render_console(frame: &mut Frame, area: Rect, app: &mut App, id: &ServerId) {
             } else {
                 "（已到最早，按 ↓ 继续向下）"
             },
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.muted),
         )));
     }
 
@@ -263,14 +264,14 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     text,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.muted),
                 ))),
                 area,
             );
         }
         AppView::ServerConsole(_) => {
             let line = Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Cyan)),
+                Span::styled("> ", Style::default().fg(app.theme.accent)),
                 Span::raw(app.input.clone()),
             ]);
             frame.render_widget(Paragraph::new(line), area);
@@ -293,8 +294,8 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let (text, color) = match &app.status {
-        Some(message) => (message.clone(), Color::Yellow),
-        None => ("就绪".to_owned(), Color::DarkGray),
+        Some(message) => (message.clone(), app.theme.warning),
+        None => ("就绪".to_owned(), app.theme.muted),
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color)))),
@@ -316,7 +317,7 @@ fn render_hints(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hints.to_owned(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.muted),
         ))),
         area,
     );
@@ -326,12 +327,12 @@ fn render_hints(frame: &mut Frame, area: Rect, app: &App) {
 ///
 /// 符号是颜色之外的第二编码——运维扫一眼列表就能数出几台在跑，
 /// 不必逐行读文字，也不必依赖终端支持 256 色。
-fn state_symbol(state: ServerState) -> (&'static str, Color) {
+fn state_symbol(state: ServerState, theme: &Theme) -> (&'static str, Color) {
     match state {
-        ServerState::Running => ("●", Color::Green),
-        ServerState::Starting | ServerState::Stopping => ("◐", Color::Yellow),
-        ServerState::Failed => ("✕", Color::Red),
-        ServerState::Stopped => ("○", Color::DarkGray),
+        ServerState::Running => ("●", theme.running),
+        ServerState::Starting | ServerState::Stopping => ("◐", theme.transitional),
+        ServerState::Failed => ("✕", theme.failed),
+        ServerState::Stopped => ("○", theme.stopped),
     }
 }
 
@@ -350,15 +351,16 @@ fn pad_to(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use atlas_core::{Event, EventBus};
+    use atlas_core::{Event, EventBus, ServerState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Cell;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Span;
 
     use crate::app::App;
     use crate::app::test_support::{app_with_servers, log_event};
+    use crate::theme::{ColorDepth, Theme};
 
     use super::render;
 
@@ -560,6 +562,77 @@ mod tests {
         for (width, height) in [(1, 1), (10, 3), (20, 8), (40, 10), (120, 40)] {
             let _ = render_text(&mut app, width, height);
         }
+    }
+
+    /// 用指定的能力等级渲染，返回逐行文本。
+    fn render_at_depth(depth: ColorDepth, width: u16, height: u16) -> String {
+        let mut app = app_with_servers(&["生存服", "建筑服"]);
+        app.theme = Theme::for_depth(depth);
+        render_text(&mut app, width, height)
+    }
+
+    #[test]
+    fn 各种终端能力下渲染结果一致() {
+        // 换终端只该换颜色，**不该换文字**——布局与文案必须完全一致。
+        let baseline = render_at_depth(ColorDepth::TrueColor, 80, 24);
+        for depth in [
+            ColorDepth::None,
+            ColorDepth::Basic,
+            ColorDepth::Ansi256,
+            ColorDepth::TrueColor,
+        ] {
+            let text = render_at_depth(depth, 80, 24);
+            assert_eq!(text, baseline, "{depth:?} 下的文字与真彩色档不一致");
+        }
+    }
+
+    #[test]
+    fn 各种终端能力下都不崩溃() {
+        for depth in [
+            ColorDepth::None,
+            ColorDepth::Basic,
+            ColorDepth::Ansi256,
+            ColorDepth::TrueColor,
+        ] {
+            for (width, height) in [(1, 1), (20, 6), (40, 12), (120, 40)] {
+                let mut app = app_with_servers(&["生存服"]);
+                app.theme = Theme::for_depth(depth);
+                let _ = render_text(&mut app, width, height);
+            }
+        }
+    }
+
+    #[test]
+    fn 无颜色档下不发出任何颜色() {
+        let mut app = app_with_servers(&["生存服"]);
+        app.theme = Theme::for_depth(ColorDepth::None);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("TestBackend 初始化失败");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("渲染失败");
+        let buffer = terminal.backend().buffer();
+        let colored = buffer.content().iter().any(|c| c.fg != Color::Reset);
+        assert!(!colored, "无颜色档不应发出任何前景色");
+    }
+
+    #[test]
+    fn 状态用到了主题的运行中颜色() {
+        let mut app = app_with_servers(&["生存服"]);
+        app.theme = Theme::for_depth(ColorDepth::TrueColor);
+        // 状态色只有在这台服务器**在跑**时才会用到。
+        app.seed_states(&[("srv0".into(), ServerState::Running)]);
+        let expected = app.theme.running;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("TestBackend 初始化失败");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("渲染失败");
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer.content().iter().any(|c| c.fg == expected),
+            "状态行应使用主题的运行中颜色 {expected:?}"
+        );
     }
 
     #[test]

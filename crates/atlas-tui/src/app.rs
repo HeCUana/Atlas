@@ -11,6 +11,8 @@ use std::collections::VecDeque;
 
 use atlas_core::{AtlasConfig, Event, EventBus, LogEvent, ServerId, ServerState};
 
+use crate::theme::Theme;
+
 /// 保留的日志条数上限。
 ///
 /// 超出上限时淘汰**最旧**的一条（见 [`App::handle_event`]），
@@ -70,6 +72,11 @@ pub struct App {
     /// 由渲染时回填（面板高度随终端尺寸变化），滚动偏移要靠它才能
     /// 正确地夹在「最早一行」与「最新一行」之间。
     pub log_viewport: usize,
+    /// 配色方案。
+    ///
+    /// 构造时按终端实际能力降级过（真彩色 → 256 色 → 基础 16 色 → 无颜色），
+    /// 界面里只用它的语义角色，不直接写死颜色。
+    pub theme: Theme,
 }
 
 impl App {
@@ -78,7 +85,17 @@ impl App {
     /// 服务器列表来自 `config.servers`，初始状态一律为
     /// [`ServerState::Stopped`]——真实状态由后续的
     /// [`Event::ServerState`] 事件驱动。
+    ///
+    /// 配色按当前终端的能力自动检测。
     pub fn new(config: AtlasConfig, bus: EventBus) -> Self {
+        Self::with_theme(config, bus, Theme::detect())
+    }
+
+    /// 用指定的配色方案创建应用状态。
+    ///
+    /// 远程 TUI 时服务端看不到客户端终端的环境，可以用这个重载
+    /// 显式指定（配合 `ATLAS_COLOR_DEPTH` 环境变量）。
+    pub fn with_theme(config: AtlasConfig, bus: EventBus, theme: Theme) -> Self {
         let servers = config
             .servers
             .iter()
@@ -100,6 +117,7 @@ impl App {
             should_quit: false,
             log_scroll: 0,
             log_viewport: 0,
+            theme,
         }
     }
 

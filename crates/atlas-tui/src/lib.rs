@@ -12,7 +12,15 @@
 //! - [`app`]：界面状态（服务器列表、选中项、日志缓冲、输入缓冲）
 //! - [`event`]：按键 → [`AppAction`] 的映射
 //! - [`remote`]：远程渲染后端与按键解码（供 SSH 通道使用）
+//! - [`theme`]：配色策略——按终端能力渐进增强，保证对比度
 //! - [`ui`]：把状态画成界面
+//!
+//! ## 配色
+//!
+//! 界面不直接写死颜色，而是用 [`theme::Theme`] 里的**语义角色**
+//! （运行中 / 已停止 / 强调 / 次要…）。主题在构造时按终端实际能力降级：
+//! 真彩色 → 256 色 → 基础 16 色 → 无颜色。降级**保持语义**（绿色还是绿色），
+//! 且每个角色对深色背景的对比度都 ≥ 4.5:1。详见 [`theme`] 模块的文档。
 //!
 //! ## 终端状态恢复（职责分工）
 //!
@@ -30,8 +38,10 @@
 pub mod app;
 pub mod event;
 pub mod remote;
+pub mod theme;
 pub mod ui;
 
 pub use app::{App, AppView, MAX_LOG_LINES, PAGE_SIZE, ServerRow};
 pub use event::{AppAction, handle_key, level_style};
+pub use theme::{ColorDepth, Theme};
 pub use ui::render;

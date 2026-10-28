@@ -696,6 +696,12 @@ async fn async_run(cli: Cli) -> Result<()> {
             println!("  授权公钥:  {}", cfg.authorized_keys.display());
             println!("  已授权:    {} 个客户端公钥", authorized.len());
             println!("  已托管:    {} 台服务器", targets.len());
+            // 颜色档位：服务端看不到客户端终端的环境，只能按自己的环境判定。
+            // 打印出来让运维知道客户端会看到什么，需要时用 ATLAS_COLOR_DEPTH 覆盖。
+            println!(
+                "  颜色档位:  {}",
+                color_depth_label(atlas_tui::ColorDepth::detect())
+            );
             // 主机密钥指纹：客户端首次连接会弹出"未知主机密钥"指纹，
             // 运维拿它核对才能确认连的是真服务器而不是中间人。
             match atlas_sftp::keygen::fingerprint_of_private_key(&cfg.host_key) {
@@ -1044,6 +1050,16 @@ fn refresh_state_snapshot(atlas: &Atlas, shared: &Arc<remote::Shared>) {
     let states = atlas.supervisor.states();
     if let Ok(mut slot) = shared.states.write() {
         *slot = states;
+    }
+}
+
+/// 颜色能力等级的中文说明。
+fn color_depth_label(depth: atlas_tui::ColorDepth) -> &'static str {
+    match depth {
+        atlas_tui::ColorDepth::None => "无颜色（NO_COLOR / TERM=dumb）",
+        atlas_tui::ColorDepth::Basic => "基础 16 色",
+        atlas_tui::ColorDepth::Ansi256 => "256 色",
+        atlas_tui::ColorDepth::TrueColor => "真彩色",
     }
 }
 
