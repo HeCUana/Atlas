@@ -24,4 +24,6 @@
 pub mod keygen;
 pub mod server;
 
-pub use keygen::{KeyFormat, KeyPair, generate_ed25519, generate_ed25519_with};
+pub use keygen::{
+    KeyFormat, KeyPair, fingerprint_of_private_key, generate_ed25519, generate_ed25519_with,
+};

@@ -569,8 +569,9 @@ async fn async_run(cli: Cli) -> Result<()> {
             // 免得用户卡在「文件不存在」这一步还要自己去造文件。
             let created_authorized =
                 atlas_sftp::server::ensure_authorized_keys(&cfg.authorized_keys)?;
-            let authorized_count =
-                atlas_sftp::server::load_authorized_keys(&cfg.authorized_keys)?.len();
+            let authorized_fingerprints =
+                atlas_sftp::server::load_authorized_keys(&cfg.authorized_keys)?;
+            let authorized_count = authorized_fingerprints.len();
 
             println!("SFTP 服务端启动中……");
             println!("  监听:      {}:{}", cfg.listen, cfg.port);
@@ -579,6 +580,13 @@ async fn async_run(cli: Cli) -> Result<()> {
             if created_authorized {
                 println!("              ↳ 已自动创建该文件（目前只有说明注释，没有公钥）");
             }
+            // 主机密钥指纹：客户端首次连接会弹出"未知主机密钥"指纹，
+            // 运维拿它核对才能确认连的是真服务器而不是中间人。
+            match atlas_sftp::keygen::fingerprint_of_private_key(&cfg.host_key) {
+                Ok(fp) => println!("  主机密钥指纹 {fp}"),
+                Err(e) => tracing::warn!("计算主机密钥指纹失败: {e}"),
+            }
+            check_authorized_keys(&cfg.host_key, &authorized_fingerprints);
             println!("  共享目录:");
             for share in &shares {
                 println!(
@@ -639,6 +647,11 @@ async fn async_run(cli: Cli) -> Result<()> {
                 .with_context(|| format!("解析主机私钥 {} 失败", cfg.host_key.display()))?;
 
             // 授权名单：与 SFTP 服务端共用同一份文件。
+            // 缺失时自动建一个（只含说明注释，不含任何公钥）——
+            // 与 `atlas serve` 的行为保持一致，否则用户会卡在
+            // "文件不存在"这一步，连不上却不知道原因。
+            let created_authorized =
+                atlas_sftp::server::ensure_authorized_keys(&cfg.authorized_keys)?;
             let authorized = remote::load_authorized_keys(&cfg.authorized_keys)?;
 
             let (intent_tx, mut intent_rx) = tokio::sync::mpsc::channel::<remote::Intent>(64);
@@ -683,6 +696,13 @@ async fn async_run(cli: Cli) -> Result<()> {
             println!("  授权公钥:  {}", cfg.authorized_keys.display());
             println!("  已授权:    {} 个客户端公钥", authorized.len());
             println!("  已托管:    {} 台服务器", targets.len());
+            // 主机密钥指纹：客户端首次连接会弹出"未知主机密钥"指纹，
+            // 运维拿它核对才能确认连的是真服务器而不是中间人。
+            match atlas_sftp::keygen::fingerprint_of_private_key(&cfg.host_key) {
+                Ok(fp) => println!("  主机密钥指纹 {fp}"),
+                Err(e) => tracing::warn!("计算主机密钥指纹失败: {e}"),
+            }
+            check_authorized_keys(&cfg.host_key, &authorized);
             println!();
             println!("远端连接（分配一个终端窗口即可看到界面）：");
             println!(
@@ -691,9 +711,20 @@ async fn async_run(cli: Cli) -> Result<()> {
                 remote::TUI_COMMAND
             );
             println!("  界面里按 s 启动 / x 停止 / r 重启选中的服务器。");
+            println!();
+            println!("客户端必须用**私钥**登录（口令认证一律拒绝）：");
+            println!(
+                "  ssh -tt -i <私钥路径> -p {} <用户名>@<Atlas主机> {}",
+                cfg.port,
+                remote::TUI_COMMAND
+            );
+            println!("  私钥用 `atlas keygen` 生成；对应的公钥要写进上面那个授权公钥文件。");
+            if created_authorized {
+                println!("  ↳ 已自动创建授权公钥文件（目前只有说明注释，没有公钥）。");
+            }
             if authorized.is_empty() {
                 println!();
-                println!("⚠️  授权公钥文件里没有可用公钥 —— 现在谁都连不上。",);
+                println!("⚠️  授权公钥文件里没有可用公钥 —— 现在谁都连不上。");
                 println!(
                     "    把远端电脑的客户端公钥写进 {}，一行一个，然后重启本服务。",
                     cfg.authorized_keys.display()
@@ -999,6 +1030,30 @@ fn refresh_state_snapshot(atlas: &Atlas, shared: &Arc<remote::Shared>) {
     if let Ok(mut slot) = shared.states.write() {
         *slot = states;
     }
+}
+
+/// 计算主机密钥指纹，并检查授权名单里是否混入了**主机密钥自己的公钥**。
+///
+/// 两把钥匙是分开的：
+/// - **主机密钥**（`keys/host_ed25519`）给客户端核对服务器身份；
+/// - **客户端公钥**（`keys/id_ed25519.pub`）给客户端证明自己身份。
+///
+/// 把主机公钥放进 `authorized_keys` 是很常见的误解——它会让
+/// "持有主机私钥文件的人"自动获得客户端登录资格，而且客户端用主机私钥登录
+/// 在语义上就是"用服务器的身份证明自己是客户端"。发现这种情况必须明确告警，
+/// 而不是让人对着一句 `Permission denied` 猜。
+fn check_authorized_keys(host_key: &std::path::Path, authorized: &[String]) {
+    let Ok(host_fp) = atlas_sftp::keygen::fingerprint_of_private_key(host_key) else {
+        return;
+    };
+    if !authorized.iter().any(|f| f == &host_fp) {
+        return;
+    }
+    println!("⚠️  授权公钥文件里包含了**主机密钥自己的公钥**。");
+    println!("    主机密钥（{host_fp}）是给客户端核对服务器身份用的，");
+    println!("    客户端登录要用**另一把**私钥：atlas keygen --path keys/id_ed25519");
+    println!("    然后把它的公钥写进授权公钥文件。");
+    println!();
 }
 
 /// 把 TUI 中输入的命令投递给对应服务器的 stdin。

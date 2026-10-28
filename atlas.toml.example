@@ -68,12 +68,17 @@ authorized_keys = "keys/authorized_keys"
 #   1) atlas keygen --path keys/host_ed25519      # 服务端主机密钥
 #   2) 把远端电脑的客户端公钥写进 keys/authorized_keys（一行一个）
 #   3) 把下面的 enabled 改成 true
-# 远端连接：ssh -tt -p 2223 <用户名>@<Atlas主机> atlas-tui
+# 远端连接：ssh -tt -i <客户端私钥> -p 2223 <用户名>@<Atlas主机> atlas-tui
+# 注意：客户端必须用**私钥**登录，口令认证一律拒绝——忘了 -i 会被拒，
+# 客户端只看到 "Permission denied (publickey,...)"。
 [remote]
 enabled = false
 listen = "0.0.0.0"
 port = 2223
 host_key = "keys/host_ed25519"
 authorized_keys = "keys/authorized_keys"
+# authorized_keys 里放的是**客户端公钥**（keys/id_ed25519.pub 的内容），
+# 不是主机密钥的公钥——两把钥匙不能混用，启动时会检测并告警。
+#
 # 注意：远程 TUI 尚未接入权限校验，能连上就能开关服。
 # 只给可信网段用时，把 listen 改成 "127.0.0.1" 或受控网段地址。
