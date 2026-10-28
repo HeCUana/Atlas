@@ -2,9 +2,10 @@
 //!
 //! ## 为什么需要
 //!
-//! SFTP 是 Atlas 的**客户端**能力——它连出去。但前提是**目标主机上有 SSH 服务在监听**。
-//! 连本机时（本机就是被 Atlas 托管的 Minecraft 服务器所在机器），前提就是本机的
-//! `sshd` 服务必须装好并在跑。否则连接会被直接拒绝（`ECONNREFUSED` / os error 10061）。
+//! Atlas 的 SFTP 能力是**服务端**方向——远端电脑用 FileZilla / WinSCP /
+//! `sftp` 命令行连进来管 Atlas 托管的服务器文件。但**本机**的这台机器
+//! 往往也需要能被第三方 SFTP 工具访问（改配置、捞日志、传文件），
+//! 前提就是本机的 `sshd` 服务必须装好并在跑。
 //!
 //! 这个模块把"装服务、启服务、查状态"收进 CLI，并额外做一次**就绪检查**：
 //! 光看服务在跑不够——私钥没生成、公钥没装到 `authorized_keys`、主机公钥不在
@@ -38,9 +39,9 @@ pub struct Status {
     pub startup: Option<String>,
     /// SSH 端口是否有进程在监听。
     pub port_listening: bool,
-    /// Atlas 客户端私钥是否存在。
+    /// 供第三方客户端使用的私钥是否存在。
     pub private_key_present: bool,
-    /// Atlas 客户端公钥是否已装进服务端的 `authorized_keys`。
+    /// 该私钥对应的公钥是否已装进服务端的 `authorized_keys`。
     pub public_key_installed: bool,
     /// 公钥实际被安装到的文件路径（未安装时为 `None`）。
     pub public_key_path: Option<PathBuf>,
@@ -82,7 +83,7 @@ fn run(program: &str, args: &[&str]) -> (bool, String) {
 
 /// 查询服务状态。
 ///
-/// `private_key` 是 Atlas 客户端私钥路径（来自配置的 `[sftp] key_path`）。
+/// `private_key` 是供第三方客户端使用的私钥路径（默认 `keys/id_ed25519`）。
 pub fn status(private_key: &std::path::Path) -> Result<Status> {
     let (installed, running, startup) = service_state();
 

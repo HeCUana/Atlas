@@ -32,7 +32,6 @@ use atlas_server::{ConsoleBridge, Supervisor};
 use clap::{Parser, Subcommand};
 
 mod scaffold;
-mod sftp_session;
 mod sshd;
 
 #[derive(Parser, Debug)]
@@ -92,7 +91,7 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// 生成 SSH 客户端密钥对（用于 SFTP / 远程连接）。
+    /// 生成 SSH 密钥对（服务端主机密钥 / 第三方客户端凭据）。
     Keygen {
         /// 私钥输出路径（默认按格式取 keys/id_ed25519 或 keys/id_ed25519.pem）。
         #[arg(long)]
@@ -110,69 +109,13 @@ enum Commands {
         #[arg(long, default_value = "atlas")]
         comment: String,
     },
-    /// 远程文件管理（SFTP）。
-    ///
-    /// 不带子命令时进入**交互式会话**（逐条执行），带子命令时一次性执行。
-    Sftp {
-        #[command(subcommand)]
-        action: Option<SftpAction>,
-        /// 接受未知主机密钥（首次连接新主机时用；会记录审计日志）。
-        #[arg(long)]
-        accept_unknown_host: bool,
-        /// 连接超时（秒）。
-        #[arg(long, default_value_t = 15)]
-        timeout: u64,
-    },
-    /// 管理本机 SSH 服务端（sshd）——SFTP 连本机时的前提。
+    /// 管理本机 SSH 服务端（sshd）——让第三方 SFTP 客户端能连本机。
     Sshd {
         #[command(subcommand)]
         action: SshdAction,
     },
     /// 启动 SFTP 服务端，让远端电脑通过 SFTP 管理 Atlas 托管的服务器文件。
     Serve,
-}
-
-#[derive(Subcommand, Debug)]
-enum SftpAction {
-    /// 列出远端目录。
-    Ls {
-        /// 远端路径（省略则列当前目录）。
-        path: Option<String>,
-    },
-    /// 查看远端文件或目录信息。
-    Stat {
-        /// 远端路径。
-        path: String,
-    },
-    /// 上传本地文件到远端。
-    Put {
-        /// 本地文件路径。
-        local: PathBuf,
-        /// 远端路径。
-        remote: String,
-    },
-    /// 下载远端文件到本地。
-    Get {
-        /// 远端路径。
-        remote: String,
-        /// 本地文件路径。
-        local: PathBuf,
-    },
-    /// 删除远端文件。
-    Rm {
-        /// 远端路径。
-        path: String,
-    },
-    /// 删除远端目录（必须为空）。
-    Rmdir {
-        /// 远端路径。
-        path: String,
-    },
-    /// 创建远端目录。
-    Mkdir {
-        /// 远端路径。
-        path: String,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -448,20 +391,23 @@ async fn async_run(cli: Cli) -> Result<()> {
                 format,
                 passphrase.as_deref(),
             )?;
-            println!("已生成 SSH 客户端密钥对：");
+            println!("已生成 SSH 密钥对：");
             println!("  私钥: {}", pair.private_path.display());
             println!("  公钥: {}", pair.public_path.display());
             println!("  格式: {}", pair.format.as_str());
             println!("  指纹: {}", pair.fingerprint);
             if pair.encrypted {
-                println!("  加密: 是（连接时需在 [sftp] 段填写 key_passphrase）");
+                println!("  加密: 是");
             }
             println!();
-            println!("下一步：把下面这行公钥追加到远端服务器的 ~/.ssh/authorized_keys：");
+            println!("公钥内容（形如 `ssh-ed25519 AAAA... 备注`）：");
             println!("  {}", pair.public_key);
             println!();
-            println!("然后在 atlas.toml 的 [sftp] 段配置：");
-            println!("  key_path = \"{}\"", pair.private_path.display());
+            println!("这把密钥的两种用途：");
+            println!("  1) 当 SFTP 服务端的主机密钥 —— atlas keygen --path keys/host_ed25519");
+            println!("     远端客户端首次连接时校验的就是它；路径写在 [sftp_server] host_key。");
+            println!("  2) 当第三方客户端连本机的凭据 —— atlas sshd authorize");
+            println!("     会把对应的公钥装进本机 sshd 的 authorized_keys。");
             #[cfg(windows)]
             println!(
                 "\n（Windows 提示：私钥文件继承所在目录的 ACL，请确认 {} 目录只对本人可写。）",
@@ -471,137 +417,11 @@ async fn async_run(cli: Cli) -> Result<()> {
                     .unwrap_or_default()
             );
         }
-        Commands::Sftp {
-            action,
-            accept_unknown_host,
-            timeout,
-        } => {
-            let Some(sftp_config) = atlas.config.sftp.clone() else {
-                anyhow::bail!(
-                    "配置里没有 [sftp] 段。先运行 `atlas init`，然后编辑 {} 填入远端服务器地址。",
-                    cli.config.display()
-                );
-            };
-
-            let mut options = atlas_sftp::SftpConnectOptions::default();
-            if let Some(path) = &sftp_config.known_hosts_path {
-                options = atlas_sftp::SftpConnectOptions::with_known_hosts(path);
-            }
-            if accept_unknown_host || sftp_config.accept_unknown_host {
-                options = options.accept_unknown_host_approved_by("命令行或配置显式批准");
-            }
-
-            let client = match tokio::time::timeout(
-                Duration::from_secs(timeout),
-                atlas_sftp::SftpClient::connect_with_config(&sftp_config, &options),
-            )
-            .await
-            {
-                Ok(Ok(client)) => client,
-                Ok(Err(e)) => {
-                    // 只有"连不上"类错误才提示去查 SSH 服务；
-                    // 凭据/权限类错误提示这个方向会把人带偏。
-                    let message = e.to_string();
-                    let looks_like_connect_failure = [
-                        "refused",
-                        "拒绝",
-                        "timed out",
-                        "超时",
-                        "unreachable",
-                        "不可达",
-                        "连接失败",
-                        "无法连接",
-                    ]
-                    .iter()
-                    .any(|marker| {
-                        message
-                            .to_ascii_lowercase()
-                            .contains(&marker.to_ascii_lowercase())
-                    });
-
-                    if looks_like_connect_failure {
-                        anyhow::bail!(
-                            "连接 SFTP 服务器 {}:{} 失败：{message}\n\
-                             提示：确认该主机上 SSH 服务在监听（sshd 未启动 / 端口不对 / 被防火墙拦截）。",
-                            sftp_config.host,
-                            sftp_config.port
-                        );
-                    }
-                    anyhow::bail!(
-                        "连接 SFTP 服务器 {}:{} 失败：{message}",
-                        sftp_config.host,
-                        sftp_config.port
-                    );
-                }
-                Err(_) => {
-                    anyhow::bail!(
-                        "连接 SFTP 服务器 {}:{} 超时（{timeout} 秒）",
-                        sftp_config.host,
-                        sftp_config.port
-                    );
-                }
-            };
-
-            match action {
-                Some(SftpAction::Ls { path }) => {
-                    let entries = client.list(path.as_deref().unwrap_or("")).await?;
-                    if entries.is_empty() {
-                        println!("（空目录）");
-                    } else {
-                        for entry in entries {
-                            let kind = if entry.is_dir { "d" } else { "-" };
-                            let size = if entry.is_dir { 0 } else { entry.size };
-                            println!("{kind} {size:>12}  {}", entry.path);
-                        }
-                    }
-                }
-                Some(SftpAction::Stat { path }) => {
-                    let entry = client.stat(&path).await?;
-                    println!("路径: {}", entry.path);
-                    println!("类型: {}", if entry.is_dir { "目录" } else { "文件" });
-                    println!("大小: {} 字节", entry.size);
-                    if let Some(m) = entry.modified {
-                        println!("修改时间: {m}");
-                    }
-                }
-                Some(SftpAction::Put { local, remote }) => {
-                    client.upload(&local, &remote).await?;
-                    println!("已上传 {} → {remote}", local.display());
-                }
-                Some(SftpAction::Get { remote, local }) => {
-                    client.download(&remote, &local).await?;
-                    println!("已下载 {remote} → {}", local.display());
-                }
-                Some(SftpAction::Rm { path }) => {
-                    client.remove(&path).await?;
-                    println!("已删除 {path}");
-                }
-                Some(SftpAction::Rmdir { path }) => {
-                    client.remove_dir(&path).await?;
-                    println!("已删除目录 {path}");
-                }
-                Some(SftpAction::Mkdir { path }) => {
-                    client.mkdir(&path).await?;
-                    println!("已创建目录 {path}");
-                }
-                // 不带子命令 → 进入交互式会话。
-                None => {
-                    // 根目录已是客户端规整过的绝对路径。
-                    let root = client.root().to_owned();
-                    println!("远端根目录: {root}");
-                    let session = sftp_session::Session::new(client, root);
-                    sftp_session::run(session).await;
-                }
-            }
-        }
         Commands::Sshd { action } => match action {
             SshdAction::Status => {
-                let key_path = atlas
-                    .config
-                    .sftp
-                    .as_ref()
-                    .and_then(|s| s.key_path.clone())
-                    .unwrap_or_else(|| PathBuf::from(AtlasConfig::DEFAULT_KEY_PATH));
+                // 私钥路径固定用默认位置：Atlas 不再作为 SFTP 客户端，
+                // 这里要检查的是「供第三方客户端连本机用的那把私钥」。
+                let key_path = PathBuf::from(AtlasConfig::DEFAULT_KEY_PATH);
                 let st = sshd::status(&key_path)?;
                 println!("本机 SSH 服务端（sshd）状态");
                 println!("  服务已安装    {}", mark(st.installed));
@@ -685,12 +505,7 @@ async fn async_run(cli: Cli) -> Result<()> {
                 println!("SSH 服务端已安装。接下来运行 `atlas sshd start` 启动它。");
             }
             SshdAction::Authorize => {
-                let key_path = atlas
-                    .config
-                    .sftp
-                    .as_ref()
-                    .and_then(|s| s.key_path.clone())
-                    .unwrap_or_else(|| PathBuf::from(AtlasConfig::DEFAULT_KEY_PATH));
+                let key_path = PathBuf::from(AtlasConfig::DEFAULT_KEY_PATH);
                 let target = sshd::authorize(&key_path)?;
                 println!("客户端公钥已装入 {}", target.display());
             }
@@ -727,6 +542,15 @@ async fn async_run(cli: Cli) -> Result<()> {
                 );
             }
 
+            // 主机密钥的父目录按需创建——不用 SFTP 的命令不会留下空的 keys/。
+            if let Some(parent) = cfg.host_key.parent()
+                && !parent.as_os_str().is_empty()
+                && !parent.exists()
+            {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    anyhow::anyhow!("创建主机密钥目录 {} 失败: {e}", parent.display())
+                })?;
+            }
             if !cfg.host_key.exists() {
                 anyhow::bail!(
                     "主机私钥不存在: {}\n\

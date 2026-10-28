@@ -104,22 +104,10 @@ atlas-cli  →  atlas-core
 - 异常退出时必须恢复终端状态（raw mode / alternate screen / 光标可见性）。
   使用 `ratatui::init()` / `ratatui::restore()`，或 `ratatui::run()`。
 
-### 4.7 SFTP 远程根目录
+### 4.7 SFTP 服务端（Atlas 作为服务端）
 
-- `[sftp] root` 决定**客户端**会话的**起点**，同时也是**访问边界**：`..` 不能越出根。
-- 路径一律用 **SFTP 绝对 POSIX 形式**。Windows 路径要经 `to_absolute_remote`
-  转换（`C:\Users\...` → `/C:/Users/...`）——与 sshd 返回的路径形式一致。
-- 路径解析必须走 `resolve_under_root`：
-  - **绝对**输入必须落在根之下，否则报错；
-  - **相对**输入拼在根之下。
-  - 不要用「前导 `/` 一律忽略」的 chroot 语义——那会让「绝对路径」和
-    「相对路径」无法区分，用户输 `/etc/passwd` 时得到的不是他以为的结果。
-- `atlas-sftp` 可以依赖 `atlas-core`（配置类型、错误类型统一由 core 提供），
-  但**不得依赖其他内部 crate**（见 §2.1）；路径语义由 `atlas-sftp` 自己实现，
-  不要把路径规则下沉到 `atlas-core`。
-
-### 4.8 SFTP 服务端（Atlas 作为服务端）
-
+- Atlas 的 SFTP 能力**只做服务端方向**：远端电脑用 SFTP 连进来管理受管服务器的文件。
+  不提供「Atlas 主动连出去」的客户端命令。
 - 服务端把客户端看到的 POSIX 路径映射到**受管服务器的真实目录**，映射与越界防护
   由 `atlas_sftp::server::VirtualFs` 负责，**不得**在 handler 里另写一套。
 - **读到文件末尾必须回 `StatusCode::Eof` 状态包，不能回空的 DATA 包。**
@@ -135,6 +123,8 @@ atlas-cli  →  atlas-core
   比谁都进不去危险得多。已有的公钥一行都不能丢。
 - 授权名单在**启动时读入**，往文件里贴完公钥要重启 `atlas serve` 才生效；
   空名单时必须明确告警，不能让人以为"服务正常但连不上"是配置问题。
+- `atlas-sftp` 可以依赖 `atlas-core`（配置类型、错误类型统一由 core 提供），
+  但**不得依赖其他内部 crate**（见 §2.1）。
 
 ## 5. 测试要求
 

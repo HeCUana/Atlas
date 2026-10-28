@@ -57,7 +57,6 @@ Atlas 的边界划得很窄，但每一条都做成"开箱即用"：
 | 子进程托管 | 将 Minecraft 服务端作为子进程启动，捕获其标准输入/输出/错误 | 已有 |
 | TUI 控制台 | 通过 TUI 单独控制每一个子进程，并可控制主进程的守护进程 | 已有 |
 | 多服务器生命周期 | 批量开服、关服、重启等开关操作 | 已有 |
-| SFTP 客户端 | Atlas 作为**客户端**连出去，远程管理所托管服务器的文件 | 已有（`atlas sftp`） |
 | SFTP 服务端 | Atlas 作为**服务端**，让远端电脑用 SFTP 连进来管理受管服务器 | 已有（`atlas serve`） |
 | 日志识别与解析 | 识别多种服务端日志格式，转换为结构化事件 | **当前重点** |
 | 事件系统 | 作为日志能力的对外接口，插件订阅事件流 | 已有 |
@@ -78,17 +77,16 @@ Atlas 的边界划得很窄，但每一条都做成"开箱即用"：
 | 命令 | 说明 |
 | --- | --- |
 | `atlas init [--force]` | 生成配置文件与必要目录；`--force` 覆盖已有配置（§2.2） |
-| `atlas start [服务器ID...]` | 启动服务器，前台守护模式（§2.7） |
+| `atlas start [服务器ID...]` | 启动服务器，前台守护模式（§2.6） |
 | `atlas stop [服务器ID...]` | 停止**本进程托管**的服务器 |
 | `atlas restart [服务器ID...]` | 重启服务器 |
 | `atlas logs <服务器ID> [--follow] [--level <级别>]` | 查看服务器日志；`--follow` 持续跟随，`--level` 只显示该级别及以上 |
-| `atlas tui` | 进入终端界面（§2.7） |
+| `atlas tui` | 进入终端界面（§2.6） |
 | `atlas plugin <list\|enable\|disable\|reload>` | 插件管理，参数为插件 ID |
 | `atlas config` | 检查配置文件 |
-| `atlas keygen [--format\|--passphrase\|--force]` | 生成 SSH 客户端密钥对（§2.3） |
-| `atlas sftp [子命令]` | SFTP **客户端**；不带子命令时进入交互式会话（§2.4） |
-| `atlas sshd <status\|start\|stop\|install\|authorize>` | 管理本机 SSH 服务端与 SFTP 就绪检查（§2.6） |
-| `atlas serve` | 启动 SFTP **服务端**（§2.5） |
+| `atlas keygen [--format\|--passphrase\|--force]` | 生成 SSH 密钥对（§2.3） |
+| `atlas sshd <status\|start\|stop\|install\|authorize>` | 管理本机 SSH 服务端与 SFTP 就绪检查（§2.5） |
+| `atlas serve` | 启动 SFTP **服务端**（§2.4） |
 
 全局选项 `-c / --config <路径>` 指定配置文件路径，默认 `atlas.toml`（§2.2）。
 
@@ -102,7 +100,7 @@ crates/
   atlas-parser/  日志识别与解析（当前重点）
   atlas-server/  子进程托管、生命周期、终端命令执行
   atlas-plugin/  插件清单、发现、注册表、热重载编排
-  atlas-sftp/    远程文件管理：SFTP 客户端 + SFTP 服务端 + SSH 密钥
+  atlas-sftp/    SFTP 服务端 + SSH 密钥生成
   atlas-tui/     终端界面
   atlas-cli/     二进制入口（atlas）
 ```
@@ -141,27 +139,30 @@ $ atlas init
 - **每次运行**：配置里引用到的目录若不存在会被补建——服务端的 `workdir` 缺失会导致进程直接启动失败，插件目录缺失会让插件发现静默返回空列表，这两处必须存在。
 - **幂等，且只补不覆盖**：已存在的目录直接跳过；已存在的**文件**原样保留。唯一的例外是**配置**——若配置里缺少当前版本才有的段落（如 `[sftp_server]`），Atlas 会**追加**缺失段落，已有内容一字不动。新增段落一律用**默认值**（`enabled = false`），所以补齐不会改变既有行为。
 
-> **`keys/authorized_keys` 的内容**：自动创建出来的文件**只有说明注释，不含任何公钥**。这是刻意的——自动生成一份「谁都能进」的授权名单，比谁都进不去危险得多。要让远端电脑连上，把客户端公钥贴进这个文件即可（见 §2.5）。
+> **`keys/authorized_keys` 的内容**：自动创建出来的文件**只有说明注释，不含任何公钥**。这是刻意的——自动生成一份「谁都能进」的授权名单，比谁都进不去危险得多。要让远端电脑连上，把客户端公钥贴进这个文件即可（见 §2.4）。
 
 相对路径一律以 **Atlas 进程的工作目录**为基准解析。
 
-### 2.3 SSH 客户端密钥（`atlas keygen`）
+### 2.3 SSH 密钥（`atlas keygen`）
 
-Atlas 用 SSH 客户端密钥连接远端服务器做 SFTP 文件管理，配置文件里的 `key_path` 指向一个**本地私钥**。
+Atlas 用 SSH 密钥做两件事：给 `atlas serve` 当**服务端主机密钥**，以及给第三方客户端当**连接凭据**。配置文件里的路径指向一个**本地私钥**。
 
 ```console
 $ atlas keygen
-已生成 SSH 客户端密钥对：
+已生成 SSH 密钥对：
   私钥: keys/id_ed25519
   公钥: keys/id_ed25519.pub
   格式: openssh
   指纹: SHA256:kJA+fxo6/RpZE7iILwkzH4blLCRWqL7yT8N/AmTzGdg
 
-下一步：把下面这行公钥追加到远端服务器的 ~/.ssh/authorized_keys：
+公钥内容（形如 `ssh-ed25519 AAAA... 备注`）：
   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL4IcFQ27/rFcMcd/814WLqvLfwlUnzw17CgoJDkohQz atlas
 
-然后在 atlas.toml 的 [sftp] 段配置：
-  key_path = "keys/id_ed25519"
+这把密钥的两种用途：
+  1) 当 SFTP 服务端的主机密钥 —— atlas keygen --path keys/host_ed25519
+     远端客户端首次连接时校验的就是它；路径写在 [sftp_server] host_key。
+  2) 当第三方客户端连本机的凭据 —— atlas sshd authorize
+     会把对应的公钥装进本机 sshd 的 authorized_keys。
 ```
 
 #### 为什么默认没有 `.pem`
@@ -184,154 +185,19 @@ $ atlas keygen --format pkcs8                          # keys/id_ed25519.pem
 $ atlas keygen --format pkcs8 --passphrase <口令>        # 加密私钥
 ```
 
-加密私钥的 PBKDF2-SHA256 迭代次数取 **600,000**（OWASP 推荐值）——OpenSSH 的历史默认值只有 16，对今天的算力毫无意义。连接时把口令填进 `[sftp] key_passphrase`。
+加密私钥的 PBKDF2-SHA256 迭代次数取 **600,000**（OWASP 推荐值）——OpenSSH 的历史默认值只有 16，对今天的算力毫无意义。
 
 #### 其余约定
 
-- **为什么不自动生成**：私钥是凭据，生成它属于安全敏感动作，不该在启动时悄悄发生；而且公钥无论如何都要人工装到远端的 `authorized_keys`，跑不掉那一步。所以这里是**显式命令**，由你决定何时生成。
+- **为什么不自动生成**：私钥是凭据，生成它属于安全敏感动作，不该在启动时悄悄发生；而且公钥无论如何都要人工装到对应的 `authorized_keys`，跑不掉那一步。所以这里是**显式命令**，由你决定何时生成。
 - 私钥为 OpenSSH 格式时与 `ssh-keygen` 生成的互相兼容；Unix 下权限收紧为 `0600`，**Windows 下自动用 `icacls` 把 ACL 收紧为「Administrators + SYSTEM」**——否则既不安全（同机其它账户可读），标准 `ssh`/`scp` 也会直接拒用该私钥（"UNPROTECTED PRIVATE KEY FILE"）。
 - 已存在的私钥**不会被覆盖**（覆盖 = 销毁旧凭据），需要覆盖请显式加 `--force`。
-- `atlas init` 会创建 `keys/` 目录；配置里若填了 `[sftp] key_path`，其父目录也会被自动补建。
+- `atlas init` 会创建 `keys/` 目录；`atlas keygen` 也会自动补建私钥的父目录。
 - `atlas init` 也会创建 `[sftp_server] authorized_keys` 指向的授权公钥文件（同样只含说明注释）；该文件**不会被覆盖**，往里贴的公钥不会丢。
 
-### 2.4 远程文件管理（`atlas sftp`）
+#### 私钥 ACL 手动收紧（Windows）
 
-Atlas 通过 SFTP 管理所托管服务器中的文件。**Atlas 是 SFTP 客户端**——`host` 填的是**远端**服务器地址。
-
-**两种用法**：
-
-```console
-$ atlas sftp                      # 交互式会话（不带子命令）
-Atlas SFTP 交互会话 — 远端根目录: /
-输入 help 查看可用命令，quit 退出。
-sftp:/> ls /
-d            0  /C:
-d            0  /D:
-sftp:/> cd C:/Users/Administrator/Desktop
-sftp:/C:/Users/Administrator/Desktop> pwd
-远端当前目录: /C:/Users/Administrator/Desktop
-sftp:/C:/Users/Administrator/Desktop> quit
-已退出会话。
-```
-
-交互会话支持的命令：
-
-| 命令 | 说明 |
-| --- | --- |
-| `ls [路径]` | 列出远端目录（默认当前目录） |
-| `stat <路径>` | 查看远端文件/目录信息 |
-| `cd <路径>` / `pwd` | 切换 / 显示远端当前目录 |
-| `lcd <路径>` / `lpwd` | 切换 / 显示**本地**当前目录 |
-| `get <远端> [本地]` | 下载（省略本地名则用远端文件名） |
-| `put <本地> [远端]` | 上传（省略远端名则放进当前目录） |
-| `rm <远端>` / `rmdir <远端>` | 删除文件 / 删除目录（须为空） |
-| `!<命令>` | 执行本地 shell 命令 |
-| `help` / `quit` | 帮助 / 退出 |
-
-**一次性模式**（带子命令，便于脚本化）：
-
-```console
-$ atlas sftp ls /
-$ atlas sftp put ./config.toml /home/mc/config.toml
-$ atlas sftp get /home/mc/latest.log ./latest.log
-$ atlas sftp mkdir /home/mc/backups
-$ atlas sftp rm /home/mc/old.log
-$ atlas sftp rmdir /home/mc/old-backups
-```
-
-先在 `atlas.toml` 里配好 `[sftp]` 段：
-
-```toml
-[sftp]
-host = "192.168.1.10"        # 远端服务器地址，不是本机
-port = 22
-username = "mc"
-key_path = "keys/id_ed25519" # `atlas keygen` 生成的私钥
-root = "/srv/minecraft"        # 可选：把 SFTP 会话限制在这个目录之下
-```
-
-#### 可配置的远程根目录
-
-`root` 决定 SFTP 会话**从哪里开始**，同时也是**访问边界**：
-
-- 省略 `root` → 会话从文件系统根开始（Linux 上是 `/`，Windows 上是盘根）；
-- 设置 `root` → 会话从该目录开始，并且**无法越出**（`..` 会被拒绝）。
-
-```console
-$ atlas sftp
-远端根目录: /C:/Users/Administrator/Desktop
-Atlas SFTP 交互会话 — 远端根目录: /C:/Users/Administrator/Desktop
-sftp:/C:/Users/Administrator/Desktop> cd 02_开发与AI
-sftp:/C:/Users/Administrator/Desktop/02_开发与AI> stat /C:/Windows
-错误: /C:/Windows 越出根目录 /C:/Users/Administrator/Desktop
-```
-
-路径规则：
-
-| 输入 | 含义 |
-| --- | --- |
-| `plugins` | 相对**当前目录** |
-| `/` | **根目录**本身 |
-| `/srv/mc/x` | 绝对路径，必须落在 `root` 之下，否则拒绝 |
-| `..` | 上级目录，但不能越过 `root` |
-
-Windows 路径会被自动转成 SFTP 的绝对 POSIX 形式：`C:\Users\Administrator\Desktop` → `/C:/Users/Administrator/Desktop`（与 sshd 返回的路径形式一致，第三方工具看到的是同一种路径）。
-
-> **第三方客户端（FileZilla 等）不受这个配置约束**——它们连的是 sshd，落地目录由 sshd 决定。要让 FileZilla 也从指定目录开始，在「站点管理器 → 高级 → 默认远程目录」填同样的路径（那只是**起始目录**，仍可往上跳）。
-
-```toml
-[sftp]
-host = "192.168.1.10"        # 远端服务器地址，不是本机
-port = 22
-username = "mc"
-key_path = "keys/id_ed25519" # `atlas keygen` 生成的私钥
-```
-
-**连不上时的排查顺序**（`ECONNREFUSED` / `os error 10061`）：
-
-1. `host` 填的是不是**远端**地址——填 `127.0.0.1` 就是连本机，本机没装 SSH 服务时必然被拒；
-2. 目标主机上 `sshd` 有没有在跑、`port` 对不对（`systemctl status sshd` / `netstat -ano | findstr :22`）；
-3. 中间有没有防火墙拦截。
-
-命令会在连接类失败时直接给出这条提示，不用自己猜：
-
-```
-Error: 连接 SFTP 服务器 127.0.0.1:22 失败：… 由于目标计算机积极拒绝，无法连接。 (os error 10061)
-提示：确认该主机上 SSH 服务在监听（sshd 未启动 / 端口不对 / 被防火墙拦截）。
-```
-
-**主机密钥校验默认开启**：未知主机一律拒绝（防中间人）。首次连新主机时，二选一——先把主机公钥写进 known_hosts，或临时用 `--accept-unknown-host`（会记录审计日志）。
-
-#### 服务端：目标主机上要先有 SSH 服务
-
-`ECONNREFUSED` / `os error 10061` 的含义是**目标端口上没人接受连接**——不是认证失败，也不是超时。对应到 Atlas：
-
-| 场景 | 要做的事 |
-| --- | --- |
-| 连的是**远端** MC 服务器 | 在那台机器上装并启动 SSH 服务（Linux：`apt install openssh-server` / `dnf install openssh-server` → `systemctl enable --now sshd`） |
-| 连的是**本机**（Windows） | 装 OpenSSH Server：`Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0` → `Start-Service sshd` → `Set-Service sshd -StartupType Automatic` → 放行防火墙 `New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22` |
-| 连的是**本机**（Linux） | `apt install openssh-server && systemctl enable --now sshd` |
-
-#### Windows 服务端的公钥放哪
-
-Windows OpenSSH 对**管理员账户**有专门规则（`sshd_config` 里的 `Match Group administrators`）——公钥不放 `~/.ssh/authorized_keys`，而是放：
-
-```
-C:\ProgramData\ssh\administrators_authorized_keys
-```
-
-并且 ACL 必须收紧到只有 Administrators 与 SYSTEM（否则 sshd 会拒绝加载）：
-
-```powershell
-icacls "C:\ProgramData\ssh\administrators_authorized_keys" /inheritance:r
-icacls "C:\ProgramData\ssh\administrators_authorized_keys" /grant '*S-1-5-32-544:F' '*S-1-5-18:F'
-```
-
-用 SID 而不是组名，是为了在非英文 Windows 上也能跑通。
-
-#### 客户端私钥的 ACL 也要收紧
-
-同一类问题在**客户端侧**同样存在：私钥默认继承所在目录的 ACL，Windows 自带的 `ssh`/`scp` 见到过宽的 ACL 会**直接拒绝使用该私钥**：
+私钥默认继承所在目录的 ACL，Windows 自带的 `ssh`/`scp` 见到过宽的 ACL 会**直接拒绝使用该私钥**：
 
 ```
 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -351,9 +217,9 @@ icacls "keys" /grant '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F'
 
 > 目录的授权**必须带 `(OI)(CI)`**（可继承）。`icacls /grant` 加的 ACE 默认只作用于该对象自身，目录不带继承标志的话，之后在目录里新建的文件会继承到**空 ACL**——文件存在却"访问被拒绝"。
 
-### 2.5 Atlas 作为 SFTP 服务端（`atlas serve`）
+### 2.4 Atlas 作为 SFTP 服务端（`atlas serve`）
 
-这是与 `atlas sftp`（客户端）**方向相反**的能力：**Atlas 当服务端**，远端运维电脑用 SFTP 连进来，管理 Atlas 所托管的服务器的文件。
+这是 Atlas 唯一的 SFTP 方向：**Atlas 当服务端**，远端运维电脑用 SFTP 连进来，管理 Atlas 所托管的服务器的文件。Atlas 不主动连出去。
 
 ```console
 $ atlas serve
@@ -436,9 +302,9 @@ authorized_keys = "keys/authorized_keys"  # 客户端公钥，一行一个
 >
 > `atlas serve` 与 `atlas start` 是**两个独立进程**：前者只提供文件通道（不启 Minecraft 服务端），后者只托管 Minecraft 服务端（不提供文件通道）。两者可以同时跑。
 
-### 2.6 本机 SSH 服务端（`atlas sshd`）
+### 2.5 本机 SSH 服务端（`atlas sshd`）
 
-SFTP 连本机时，前提是本机有 SSH 服务在跑。`atlas sshd` 负责这件事，并附带一份**就绪检查**：
+本机这台机器有时也需要能被第三方 SFTP 工具（FileZilla / WinSCP）访问——改配置、捞日志、传文件。前提是本机有 SSH 服务在跑，`atlas sshd` 负责这件事，并附带一份**就绪检查**：
 
 ```console
 $ atlas sshd status
@@ -463,6 +329,8 @@ SFTP 就绪 ✓
 | `atlas sshd install` | 安装 SSH 服务端（Windows 装 OpenSSH Server 可选功能） |
 | `atlas sshd authorize` | 把客户端公钥装进服务端的 `authorized_keys`（并收紧 ACL） |
 
+> **`authorize` 用的是哪把私钥**：`keys/id_ed25519`（`atlas keygen` 的默认输出）。它是给**第三方客户端**用的凭据——第三方客户端拿这把私钥连本机。它与 `atlas serve` 的主机私钥（`keys/host_ed25519`）是**两把不同的钥匙**，不要混用。
+>
 > **安全约定**：启动 SSH 服务会对外开放 22 端口，属于安全敏感操作。所以这里只有**显式命令**，**绝不在 Atlas 启动时自动开启**。
 >
 > `authorize` 从**私钥**推导公钥（不依赖可能陈旧的 `.pub` 文件），并且**拒绝**往混有私钥的文件里写——那只会掩盖问题。曾经写进 `authorized_keys` 的私钥应视为**已泄漏**，需要作废并重新生成。
@@ -495,7 +363,7 @@ $ atlas sshd status
 >
 > **私钥格式**：FileZilla 3.60+ 原生支持 OpenSSH 格式私钥（`-----BEGIN OPENSSH PRIVATE KEY-----`），无需转成 PuTTY 的 `.ppk`。
 
-### 2.7 运行方式
+### 2.6 运行方式
 
 `atlas start` 是**前台守护模式**：启动目标服务器后接管它们，按 `[服务器ID] ` 前缀实时输出各服务器的控制台行。
 
@@ -539,15 +407,14 @@ $ atlas start
 │  │ (子进程)  │ │ (子进程)  │ │ (子进程)       ││
 │  └──────────┘ └──────────┘ └───────────────┘│
 │                                             │
-│  ┌──────────┐         ┌──────────┐          │
-│  │ SFTP 客户端│         │ SFTP 服务端│          │
-│  │ (连出去)  │         │ (接进来)  │          │
-│  └────┬─────┘         └────┬─────┘          │
-└───────┼─────────────────────┼────────────────┘
-        │                     │
-        │  SFTP               │  SFTP
-        ▼                     ▼
-  远端服务器            远端运维节点
+│  ┌──────────────┐                          │
+│  │  SFTP 服务端  │                          │
+│  │  （接进来）   │                          │
+│  └───────┬──────┘                          │
+└──────────┼──────────────────────────────────┘
+           │  SFTP
+           ▼
+     远端运维节点
 ```
 
 每个 Minecraft 服务端是 Atlas 的直接子进程：
@@ -556,12 +423,9 @@ $ atlas start
 - **输出**：Atlas 持续读取子进程 stdout/stderr，用于日志解析与 TUI 展示。
 - **生命周期**：开服 = spawn；关服 = 向 stdin 写入停止命令并等待进程退出；重启 = 关服 + 开服。
 
-**SFTP 有两个方向**（§2.4 / §2.5），它们是**两个独立进程**，可以同时跑但互不感知：
+**SFTP 只有服务端这一个方向**（§2.4）：`atlas serve` 监听端口，等远端运维电脑用 FileZilla / WinSCP / `sftp` 命令行连进来，管 Atlas 托管的服务器文件。Atlas **不主动连出去**。
 
-| 方向 | 进程 | 作用 |
-| --- | --- | --- |
-| 客户端 | `atlas sftp` | Atlas 连**出去**，到远端服务器上管文件 |
-| 服务端 | `atlas serve` | 远端电脑连**进来**，管 Atlas 托管的服务器的文件 |
+> `atlas serve` 与 `atlas start` 是**两个独立进程**：前者只提供文件通道（不启 Minecraft 服务端），后者只托管 Minecraft 服务端（不提供文件通道）。两者可以同时跑，但互不感知——TUI 无法附加到已经在运行的 `atlas serve` 上。
 
 > **设计要点（建议）**：读取子进程输出时，stdout 与 stderr 必须由两个独立任务并发读取，否则高日志量下管道写满会造成互相阻塞死锁。行分隔不能只认 `\n`——Minecraft 服务端控制台的进度条使用 `\r` 覆盖同一行，因此应把 `\r` 与 `\n` 都视为行终止符，并把 `\r` 之间的片段视为"同一行的进度更新"而非独立日志行。
 >
@@ -577,7 +441,7 @@ TUI 负责：
 
 远程 TUI 让运维节点在异地直接进入同一套 TUI。
 
-> **当前实现状态**：**尚未实现**。`atlas-tui` 里没有任何远程通道代码，本节描述的是待选型的目标形态。已有的相关基础设施是 SFTP 服务端（§2.5）——它已经用 `russh` 服务端跑通，可作为远程 TUI 的承载基础。
+> **当前实现状态**：**尚未实现**。`atlas-tui` 里没有任何远程通道代码，本节描述的是待选型的目标形态。已有的相关基础设施是 SFTP 服务端（§2.4）——它已经用 `russh` 服务端跑通，可作为远程 TUI 的承载基础。
 
 > **待确认**：远程 TUI 的传输层尚未在项目背景中确定。Rust 生态里已有成熟先例——`russh` 服务端 + PTY 通道承载 `ratatui` 界面（`kty`、`kartoffels`、`sandhole` 等项目均采用此模式），且 `russh` + `russh-sftp` 可以同时满足"远程 TUI"和"SFTP 文件管理"两项需求。因此 **SSH 承载远程 TUI 是候选方案中复用度最高的一种**（建议）。但若最终选型为自研协议，则需额外实现认证、加密、终端尺寸同步与按键编码映射。
 >
@@ -921,7 +785,7 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 ### 9.1 已有能力 / 当前重点
 
 - 子进程托管、多服务器批量开关服、TUI；
-- SFTP 远程文件管理：**客户端**（`atlas sftp`）与**服务端**（`atlas serve`）两个方向都已可用；
+- SFTP 远程文件管理：**服务端**方向（`atlas serve`）——远端电脑连进来管文件；
 - **日志识别与解析（当前重点）**：Log4j2 家族与 CraftBukkit 家族双兼容，产出结构化事件；
 - 事件系统、命令树、终端命令执行与结果采集；
 - 插件系统：多形态插件 + 热重载 + 权限管理。
@@ -973,7 +837,7 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | 9 | **子进程管道读写并发不足造成死锁** | 服务端卡死、Atlas 无响应 | 建议 stdout / stderr 双任务并发读取 + 行缓冲策略（§3.1） |
 | 10 | **终端状态未在异常退出时恢复** | 用户终端不可用 | 建议使用 `ratatui::run()`，并补充 panic / 信号处理路径的恢复 |
 | 11 | **权限模型未接入产生副作用的入口** | 任何能触达 CLI 的人都能开服、关服、走 SFTP | **未解决**。模型与判定逻辑已写在 `atlas-core` 并有单测，但开关服、SFTP、命令树、TUI 控制这些入口目前是**直接执行、不做校验**的。接入时须逐入口独立校验，且判定输入只能是 `Subject`/`Action`/`Resource` 三元组（§7.3） |
-| 12 | **SFTP 服务端默认监听 `0.0.0.0`，且授权名单改动需重启生效** | 端口意外暴露；贴完公钥却连不上，误判为配置问题 | 部分缓解。授权名单为空时启动横幅会明确告警；`listen` 可改为 `127.0.0.1`。**名单无热重载**——贴完公钥必须重启 `atlas serve`（§2.5） |
+| 12 | **SFTP 服务端默认监听 `0.0.0.0`，且授权名单改动需重启生效** | 端口意外暴露；贴完公钥却连不上，误判为配置问题 | 部分缓解。授权名单为空时启动横幅会明确告警；`listen` 可改为 `127.0.0.1`。**名单无热重载**——贴完公钥必须重启 `atlas serve`（§2.4） |
 
 ---
 
@@ -993,8 +857,8 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | **终端日志抓取** | 通过相对路径或绝对路径读取服务器控制台日志并解析 |
 | **Mod 接口** | 通过 Mod 在游戏内获取信息、传输至 Atlas，或由 Mod 接口返回信息 |
 | **远程 TUI** | 远程终端用户界面连接能力 |
-| **SFTP** | SSH 文件传输协议（SSH File Transfer Protocol），用于远程管理服务器中的文件。Atlas 既作**客户端**（`atlas sftp` 连出去）也作**服务端**（`atlas serve` 接进来） |
-| **虚拟目录树** | SFTP 服务端对外呈现的路径结构：客户端看到的 `/<服务器ID>/...`，实际落在各受管服务器的真实目录上（§2.5） |
+| **SFTP** | SSH 文件传输协议（SSH File Transfer Protocol）。Atlas 只作**服务端**（`atlas serve` 接进来），不主动连出去 |
+| **虚拟目录树** | SFTP 服务端对外呈现的路径结构：客户端看到的 `/<服务器ID>/...`，实际落在各受管服务器的真实目录上（§2.4） |
 
 ---
 
@@ -1017,9 +881,8 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 | 首次运行的配置与目录 | `atlas init` 显式脚手架；任何子命令在配置缺失时也会自动生成 `atlas.toml` 模板并建好 `servers/`、`plugins/`、`keys/`、日志目录与各服务器 `workdir`。**已有配置不会被覆盖**（除非 `--force`）；若配置缺少当前版本才有的段落（如 `[sftp_server]`），Atlas 只**追加**缺失段落，已有内容一字不动，新增段落用默认值（`enabled = false`） |
 | SFTP 服务端的定位与授权模型 | Atlas 可作为 **SFTP 服务端**（`atlas serve`）让远端电脑连进来管理受管服务器的文件，与客户端方向相反。客户端看到**虚拟目录树** `/<服务器ID>/...`，由 `atlas_sftp::server::VirtualFs` 统一做路径映射与越界防护。**只接受公钥认证**，口令一律拒绝；主机私钥（`keys/host_ed25519`）与客户端授权公钥（`keys/authorized_keys`）是**两把不同的钥匙** |
 | 授权公钥文件的自动创建 | 文件缺失时**自动创建**（`atlas init` 与 `atlas serve` 都会），内容**只有说明注释、不含任何公钥**——新建即「谁都进不去」，比自动生成一份「谁都能进」的名单安全得多。**绝不覆盖已有文件**。名单在启动时读入，贴完公钥需重启 `atlas serve` |
-| SSH 客户端密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装到远端 `authorized_keys`。需要标准 PKCS#8 PEM 用 `--format pkcs8`（该格式支持 `--passphrase` 加密，PBKDF2-SHA256 迭代 600,000 次） |
-| SFTP 客户端的连接语义 | Atlas 是 **SFTP 客户端**，`[sftp] host` 填**远端**服务器地址。未知主机默认拒绝（防中间人），首次连接用 `--accept-unknown-host` 或先写入 known_hosts |
-| 客户端私钥的 ACL | `atlas keygen` 自动收紧：Unix `0600`，Windows `icacls` 收紧为「Administrators + SYSTEM」。不收紧的话 Windows 自带 `ssh`/`scp` 会以 "UNPROTECTED PRIVATE KEY FILE" 拒用该私钥 |
+| SSH 密钥的生成方式 | `atlas keygen` 显式命令，生成 OpenSSH 格式的 Ed25519 密钥对（私钥默认 `keys/id_ed25519`，Unix 权限 0600）。一把密钥有两种角色：`keys/host_ed25519` 作服务端主机密钥，`keys/id_ed25519` 作第三方客户端连本机的凭据。**不做静默自动生成**——私钥是凭据，且公钥无论如何要人工装进对应的 `authorized_keys`。需要标准 PKCS#8 PEM 用 `--format pkcs8`（该格式支持 `--passphrase` 加密，PBKDF2-SHA256 迭代 600,000 次） |
+| 私钥的 ACL | `atlas keygen` 自动收紧：Unix `0600`，Windows `icacls` 收紧为「Administrators + SYSTEM」。不收紧的话 Windows 自带 `ssh`/`scp` 会以 "UNPROTECTED PRIVATE KEY FILE" 拒用该私钥 |
 | Windows 服务端的公钥位置 | 管理员账户走 `C:\ProgramData\ssh\administrators_authorized_keys`（`sshd_config` 的 `Match Group administrators` 规则），且 ACL 须收紧到仅 Administrators + SYSTEM |
 
 ### 12.2 仍待决策
@@ -1030,10 +893,10 @@ Atlas 的多条能力入口最终都会触达"以高权限执行某事"：
 3. **Mod 与 Atlas 之间的具体协议**：传输层、编码格式、鉴权、版本协商策略。
 4. **"相对路径或绝对路径控制服务器控制台"的确切语义**：路径指向日志文件还是控制台输入；相对路径的解析基准。
 5. **命令树的命名空间与优先级规则**：插件命令前缀、冲突检测与报错方式、游戏内内置命令的仲裁归属。
-6. **SFTP 凭据管理**：多服务器的账号 / 密钥存储、密钥轮换、以及与远程 TUI 凭据是否统一。
+6. **SFTP 凭据管理**：服务端侧的授权名单怎么组织——多台 Atlas 的授权公钥是否集中管理、密钥轮换流程、以及与远程 TUI 凭据是否统一。
 7. **支持的服务端与部署形态范围**：是否需要兼容第三方面板代理的 stdout 形态；Cobble / Velocity 等代理端是否在范围内。
 8. **`.rs` 源码插件的生产化路径**：运行时编译需要 Rust 工具链，依赖 vendoring 方案待定。
 9. **是否需要贡献指南 / CI**：当前仓库缺少 CI 配置与 PR 模板。
-10. **SFTP 服务端的授权名单热重载**：名单在启动时读入，贴完公钥必须重启 `atlas serve`（§2.5）。是否要引入文件监听 / 信号触发的热重载？目前是明确的已知限制，不是疏漏。
+10. **SFTP 服务端的授权名单热重载**：名单在启动时读入，贴完公钥必须重启 `atlas serve`（§2.4）。是否要引入文件监听 / 信号触发的热重载？目前是明确的已知限制，不是疏漏。
 11. **SFTP 服务端的身份能否复用 Atlas 权限模型**：服务端现在只做「这个公钥在不在名单里」的**二元判定**，不区分 §7 里的 `Subject` / `Action` / `Resource`。若要让「只读运维账号」与「可写运维账号」在同一份 `authorized_keys` 里区分开，需要决定公钥行如何携带 Atlas 主体身份（例如 `authorized_keys` 的注释字段，或另配一份主体映射表）。
 

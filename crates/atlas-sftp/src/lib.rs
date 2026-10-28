@@ -1,14 +1,13 @@
-//! Atlas 远程文件管理（SFTP）。
+//! Atlas 作为 **SFTP 服务端**：让远端运维电脑通过 SFTP 连到 Atlas，
+//! 管理 Atlas 所托管的各个服务器的文件。
 //!
-//! 通过 SFTP 管理 Atlas 所托管的每个服务器中的文件。
+//! Atlas 在这个方向上**只做服务端**，不做客户端——远程电脑用
+//! FileZilla / WinSCP / `sftp` 命令行连进来，Atlas 不主动连出去。
 //!
 //! ## 模块划分
 //!
-//! - [`client`]：SFTP 客户端（连接、列举、上传下载、删除、建目录）；
-//! - [`credentials`]：认证凭据，敏感字段在 `Debug` 中脱敏；
-//! - [`hostkey`]：SSH 主机密钥校验（known_hosts），防中间人攻击；
-//! - [`keygen`]：SSH 客户端密钥对生成（供 `atlas keygen` 使用）；
-//! - [`path`]：路径拼接与本地映射的**纯函数**，是本 crate 的测试主体。
+//! - [`server`]：SFTP 服务端（虚拟文件系统、协议处理、SSH 会话）；
+//! - [`keygen`]：SSH 密钥对生成（供 `atlas keygen` 使用）。
 //!
 //! ## 选型约束
 //!
@@ -18,21 +17,11 @@
 //!
 //! ## 安全约定
 //!
-//! - 连接时强制校验服务端主机密钥，未知主机默认拒绝；
-//! - 日志与错误信息不含口令、私钥等机密内容。
+//! - **只接受公钥认证**，口令认证一律拒绝；
+//! - 客户端路径必须落在共享目录之内，越界一律拒绝；
+//! - 授权名单在启动时读入，日志与错误信息不含口令、私钥等机密内容。
 
-pub mod client;
-pub mod credentials;
-pub mod hostkey;
 pub mod keygen;
-pub mod path;
 pub mod server;
 
-pub use client::{RemoteEntry, SftpClient, SftpConnectOptions};
-pub use credentials::SftpCredentials;
-pub use hostkey::{HostKeyDecision, KnownHostEntry, UnknownHostPolicy};
 pub use keygen::{KeyFormat, KeyPair, generate_ed25519, generate_ed25519_with};
-pub use path::{
-    human_size, is_hidden, join_remote, normalize_remote, resolve_under_root, sanitize_local_path,
-    to_absolute_remote,
-};

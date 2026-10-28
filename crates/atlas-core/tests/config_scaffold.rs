@@ -38,7 +38,7 @@ fn 模板包含关键配置项的说明() {
         "[data_source]",
         "plugin_dir",
         "event_capacity",
-        "[sftp]",
+        "[sftp_server]",
         "log_profiles",
     ] {
         assert!(template.contains(key), "模板应包含 {key}");
@@ -117,87 +117,36 @@ fn 空的插件目录不会被算作必需目录() {
 }
 
 #[test]
-fn sftp_私钥所在目录属于必需目录() {
-    // 私钥文件不存在时连接必然失败，目录得先在。
-    let config = AtlasConfig {
-        sftp: Some(atlas_core::SftpConfig {
-            host: "10.0.0.5".into(),
-            port: 22,
-            username: "mc".into(),
-            password: None,
-            key_path: Some(PathBuf::from("keys/id_ed25519")),
-            key_passphrase: None,
-            root: None,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let dirs = config.required_dirs();
+fn sftp_服务端的默认端口不是_22() {
+    // 22 端口留给本机的 OpenSSH 服务端，避免两边抢端口。
+    let config = AtlasConfig::default();
+    assert_eq!(config.sftp_server.port, 2222);
     assert!(
-        dirs.contains(&PathBuf::from("keys")),
-        "私钥目录应被包含，实际 {dirs:?}"
+        !config.sftp_server.enabled,
+        "SFTP 服务端必须默认关闭，不能在启动时悄悄对外开端口"
     );
 }
 
 #[test]
-fn sftp_私钥在绝对路径时取其父目录() {
-    let config = AtlasConfig {
-        sftp: Some(atlas_core::SftpConfig {
-            host: "10.0.0.5".into(),
-            port: 22,
-            username: "mc".into(),
-            password: None,
-            key_path: Some(PathBuf::from("/etc/atlas/keys/id_ed25519")),
-            key_passphrase: None,
-            root: None,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let dirs = config.required_dirs();
-    assert!(dirs.contains(&PathBuf::from("/etc/atlas/keys")));
+fn sftp_服务端默认关闭时_授权名单与主机密钥路径仍有默认值() {
+    let config = AtlasConfig::default();
+    assert_eq!(
+        config.sftp_server.host_key,
+        PathBuf::from("keys/host_ed25519")
+    );
+    assert_eq!(
+        config.sftp_server.authorized_keys,
+        PathBuf::from("keys/authorized_keys")
+    );
 }
 
 #[test]
-fn 没有_sftp_配置时不引入密钥目录() {
+fn sftp_服务端的主机密钥目录不计入通用必需目录() {
+    // 主机密钥目录由 `atlas serve` 按需创建，不该让 `atlas start` 也留下空目录。
     let config = AtlasConfig::default();
     let dirs = config.required_dirs();
-    assert!(!dirs.contains(&PathBuf::from("keys")));
-}
-
-#[test]
-fn sftp_配置的口令与私钥口令都不进_debug() {
-    let config = atlas_core::SftpConfig {
-        host: "10.0.0.5".into(),
-        port: 22,
-        username: "mc".into(),
-        password: Some("super-secret-pw".into()),
-        key_path: Some(PathBuf::from("keys/id_ed25519")),
-        key_passphrase: Some("super-secret-passphrase".into()),
-        known_hosts_path: None,
-        accept_unknown_host: false,
-        root: None,
-    };
-    let rendered = format!("{config:?}");
     assert!(
-        !rendered.contains("super-secret-pw"),
-        "口令泄漏: {rendered}"
-    );
-    assert!(
-        !rendered.contains("super-secret-passphrase"),
-        "私钥口令泄漏: {rendered}"
-    );
-    assert!(
-        rendered.contains("10.0.0.5"),
-        "非机密字段应保留: {rendered}"
-    );
-}
-
-#[test]
-fn 未知主机默认不自动接受() {
-    let config = atlas_core::SftpConfig::default();
-    assert!(
-        !config.accept_unknown_host,
-        "默认必须拒绝未知主机，否则主机密钥校验形同虚设"
+        !dirs.contains(&PathBuf::from("keys")),
+        "不应无条件补建 keys 目录，实际 {dirs:?}"
     );
 }

@@ -94,72 +94,6 @@ impl Default for DataSource {
     }
 }
 
-/// SFTP 连接配置。
-///
-/// ## 敏感字段
-///
-/// `password` 是敏感字段。**不要**为此类型派生 `Debug`——
-/// `Debug` 实现是手写的，口令一律渲染为 `***`，私钥路径保留（路径本身不是机密，
-/// 但若不希望暴露请在调用侧自行处理）。
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SftpConfig {
-    /// 主机地址。
-    pub host: String,
-    /// 端口。
-    #[serde(default = "default_sftp_port")]
-    pub port: u16,
-    /// 用户名。
-    pub username: String,
-    /// 口令（明文存储仅建议用于本地开发）。
-    #[serde(default)]
-    pub password: Option<String>,
-    /// 私钥路径。
-    #[serde(default)]
-    pub key_path: Option<PathBuf>,
-    /// 私钥口令（私钥被加密时才需要）。
-    #[serde(default)]
-    pub key_passphrase: Option<String>,
-    /// known_hosts 文件路径；`None` 时使用 `~/.ssh/known_hosts`。
-    #[serde(default)]
-    pub known_hosts_path: Option<PathBuf>,
-    /// 是否接受**未知主机**（首次连接）。
-    ///
-    /// 默认 `false`——主机密钥校验是防中间人攻击的关键，不该默认关闭。
-    /// 首次连接新主机时，要么先把主机公钥写进 known_hosts，
-    /// 要么显式开启此项（会记录审计日志）。
-    #[serde(default)]
-    pub accept_unknown_host: bool,
-    /// 远程根目录（SFTP chroot 之外的起始目录）。
-    #[serde(default)]
-    pub root: Option<String>,
-}
-
-impl std::fmt::Debug for SftpConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SftpConfig")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("username", &self.username)
-            .field(
-                "password",
-                &self.password.as_ref().map(|_| "***".to_owned()),
-            )
-            .field("key_path", &self.key_path)
-            .field(
-                "key_passphrase",
-                &self.key_passphrase.as_ref().map(|_| "***".to_owned()),
-            )
-            .field("known_hosts_path", &self.known_hosts_path)
-            .field("accept_unknown_host", &self.accept_unknown_host)
-            .field("root", &self.root)
-            .finish()
-    }
-}
-
-fn default_sftp_port() -> u16 {
-    22
-}
-
 /// SFTP 服务端的一个共享目录。
 ///
 /// 客户端看到的是**虚拟路径** `/<name>/...`，实际落在本机的 `path` 之下。
@@ -244,9 +178,6 @@ pub struct AtlasConfig {
     /// 数据源模式。
     #[serde(default)]
     pub data_source: DataSource,
-    /// SFTP 连接配置（Atlas 作为**客户端**连出去）。
-    #[serde(default)]
-    pub sftp: Option<SftpConfig>,
     /// SFTP 服务端配置（Atlas 作为**服务端**让别人连进来）。
     #[serde(default)]
     pub sftp_server: SftpServerConfig,
@@ -274,7 +205,6 @@ impl Default for AtlasConfig {
         Self {
             servers: Vec::new(),
             data_source: DataSource::default(),
-            sftp: None,
             sftp_server: SftpServerConfig::default(),
             event_capacity: default_event_capacity(),
             plugin_dir: default_plugin_dir(),
@@ -378,14 +308,10 @@ impl AtlasConfig {
             }
         }
 
-        // SFTP 客户端私钥所在目录：私钥不存在时要报错，目录得先在。
-        if let Some(sftp) = &self.sftp
-            && let Some(key_path) = &sftp.key_path
-            && let Some(parent) = key_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            dirs.push(parent.to_path_buf());
-        }
+        // 注意：SFTP 服务端的主机密钥目录**不**在这里补建。
+        // `required_dirs()` 会在每个命令启动时执行，无条件补建 `keys/`
+        // 会让完全不用 SFTP 的 `atlas start` 也留下一个空目录。
+        // 服务端真正要用时（`atlas serve`）再按需创建。
 
         dirs
     }
@@ -447,25 +373,7 @@ impl AtlasConfig {
              # host_key = \"keys/host_ed25519\"        # `atlas keygen --path keys/host_ed25519`\n\
              # authorized_keys = \"keys/authorized_keys\"  # 客户端的公钥，一行一个\n\
              #   —— 文件不用自己建：atlas init 会生成它，atlas serve 发现缺失时也会自动建。\n\
-             #      自动建出来的文件只有说明注释、不含公钥，所以暂时谁都连不上。\n\
-             \n\
-             # ── SFTP 远程文件管理（可选） ────────────────────────────────\n\
-             # 客户端私钥用 `atlas keygen` 生成（默认落在 keys/id_ed25519）。\n\
-             #\n\
-             # 注意：Atlas 是 SFTP **客户端**，host 填**远端**服务器地址，\n\
-             # 不是本机（本机没装 SSH 服务时连 127.0.0.1 必然 ECONNREFUSED）。\n\
-             #\n\
-             # root 决定会话从哪里开始，同时也是访问边界：`..` 无法越出。\n\
-             # Windows 路径会自动转成 SFTP 绝对形式（C:\\Users\\... → /C:/Users/...）。\n\
-             # [sftp]\n\
-             # host = \"192.168.1.10\"\n\
-             # port = 22\n\
-             # username = \"mc\"\n\
-             # key_path = \"keys/id_ed25519\"\n\
-             # key_passphrase = \"\"       # 私钥被加密时才需要\n\
-             # known_hosts_path = \"\"     # 留空则用 ~/.ssh/known_hosts\n\
-             # accept_unknown_host = false # 首次连接新主机时才临时开启\n\
-             # root = \"/srv/minecraft\"\n",
+             #      自动建出来的文件只有说明注释、不含公钥，所以暂时谁都连不上。\n",
         );
         out
     }
