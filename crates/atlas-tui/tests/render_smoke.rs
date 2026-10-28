@@ -61,10 +61,12 @@ fn line_text(row: &[Cell]) -> String {
     text
 }
 
-fn render_text(app: &App, width: u16, height: u16) -> String {
+fn render_text(app: &mut App, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("TestBackend 初始化失败");
-    terminal.draw(|frame| render(frame, app)).expect("渲染失败");
+    terminal
+        .draw(|frame| render(frame, &mut *app))
+        .expect("渲染失败");
     let buffer = terminal.backend().buffer();
     buffer
         .content()
@@ -76,11 +78,13 @@ fn render_text(app: &App, width: u16, height: u16) -> String {
 
 #[test]
 fn dashboard_smoke_render() {
-    let app = app_with_servers(&["生存服", "建筑服"]);
-    let text = render_text(&app, 80, 24);
+    let mut app = app_with_servers(&["生存服", "建筑服"]);
+    let text = render_text(&mut app, 80, 24);
     assert!(text.contains("服务器"), "缺少服务器面板标题:\n{text}");
     assert!(text.contains("生存服"), "缺少服务器名:\n{text}");
-    assert!(text.contains(">"), "缺少输入提示符:\n{text}");
+    // 总览视图**没有输入框**——输入框只在控制台视图。
+    assert!(!text.contains('>'), "总览视图不应有输入提示符:\n{text}");
+    assert!(text.contains("s 启动"), "总览应提示启动键:\n{text}");
 }
 
 #[test]
@@ -88,9 +92,11 @@ fn console_smoke_render() {
     let mut app = app_with_servers(&["生存服"]);
     app.handle_event(Event::Log(log_event("srv0", "服务器已启动")));
     app.enter_console();
-    let text = render_text(&app, 80, 24);
+    let text = render_text(&mut app, 80, 24);
     assert!(text.contains("输出"), "缺少输出面板:\n{text}");
     assert!(text.contains("服务器已启动"), "缺少日志内容:\n{text}");
+    // 输入框只在控制台视图。
+    assert!(text.contains('>'), "控制台视图应有输入提示符:\n{text}");
 }
 
 #[test]
@@ -108,18 +114,20 @@ fn key_handling_smoke() {
     assert_eq!(move_down, AppAction::Move(1));
     assert_eq!(app.selected, 1);
 
+    // 总览里 Enter 是"进入控制台"，不是"提交"。
+    let enter = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(enter, AppAction::ToggleView);
+    assert_eq!(app.view, AppView::ServerConsole(ServerId::new("srv1")));
+
+    // 控制台里 Enter 才是提交。
     let submit = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(submit, AppAction::Submit);
-
-    let toggle = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(toggle, AppAction::ToggleView);
-    assert_eq!(app.view, AppView::ServerConsole(ServerId::new("srv1")));
 }
 
 #[test]
 fn small_terminal_smoke_render() {
-    let app = app_with_servers(&["生存服"]);
-    let text = render_text(&app, 30, 8);
+    let mut app = app_with_servers(&["生存服"]);
+    let text = render_text(&mut app, 30, 8);
     assert!(
         text.contains("服务器"),
         "小终端下也应渲染出面板标题:\n{text}"

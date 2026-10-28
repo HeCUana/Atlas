@@ -428,7 +428,7 @@ async fn run_tui_session(
         let (width, height) = term_size.get();
         terminal.backend_mut().resize(width, height);
 
-        if let Err(e) = terminal.draw(|frame| atlas_tui::render(frame, &app)) {
+        if let Err(e) = terminal.draw(|frame| atlas_tui::render(frame, &mut app)) {
             break Err(anyhow::anyhow!("绘制远程界面失败: {e}"));
         }
 
@@ -520,7 +520,7 @@ async fn handle_key(
         AppAction::RestartServer(id) => {
             send_intent(shared, Intent::Restart(id.to_string()));
         }
-        AppAction::ToggleView | AppAction::Move(_) | AppAction::None => {}
+        AppAction::ToggleView | AppAction::Move(_) | AppAction::ScrollLog(_) | AppAction::None => {}
     }
 }
 

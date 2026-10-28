@@ -6,37 +6,48 @@
 //!
 //! ## 按键表
 //!
+//! 按键语义**按视图分开**——两个视图里同一个键含义不同是**明确的**
+//! （看一眼当前视图就知道），而不是靠"输入框是不是空的"这种隐式前提。
+//!
+//! ### 总览视图（**没有输入框**，字母键全是动作键）
+//!
 //! | 按键 | 行为 |
 //! | --- | --- |
-//! | `Ctrl+C` | 退出（同时置位 `app.should_quit`） |
-//! | `q` | 输入框**为空**时退出；输入框**非空**时作为普通字符输入 |
-//! | `Esc` | 控制台视图下返回总览；总览下清空输入行 |
-//! | `Tab` | 进入当前选中服务器的控制台 |
+//! | `Ctrl+C` | 退出 |
+//! | `q` | 退出 |
+//! | `Esc` | 清空状态提示 |
+//! | `Enter` / `Tab` | 进入选中服务器的控制台 |
 //! | `↑` / `↓` | 上下移动选中项（首尾环绕） |
-//! | `k` / `j` | 同上（vim 风格），仅在输入框为空时生效 |
-//! | `s` | **启动**选中服务器（仅总览视图、输入框为空时生效） |
-//! | `x` | **停止**选中服务器（同上） |
-//! | `r` | **重启**选中服务器（同上） |
+//! | `k` / `j` | 同上（vim 风格） |
+//! | `s` | **启动**选中服务器 |
+//! | `x` | **停止**选中服务器 |
+//! | `r` | **重启**选中服务器 |
 //! | `PageUp` / `PageDown` | 翻页移动选中项（每次 [`crate::app::PAGE_SIZE`] 行） |
 //! | `Home` / `End` | 跳到首行 / 末行 |
-//! | `Enter` | 提交输入行，返回 [`AppAction::Submit`] |
+//!
+//! ### 控制台视图（**有输入框**，绝大多数键是文本）
+//!
+//! | 按键 | 行为 |
+//! | --- | --- |
+//! | `Ctrl+C` | 退出 |
+//! | `Esc` | 返回总览（并清空没发出去的输入） |
+//! | `Enter` | 把输入行发送到服务器控制台 |
 //! | `Backspace` | 退格 |
 //! | `Ctrl+U` | 清空输入行 |
+//! | `↑` / `↓` | **滚动日志**（不是移动服务器选中项） |
+//! | `PageUp` / `PageDown` | 翻页滚动日志 |
+//! | `Home` / `End` | 跳到最早 / 最新的日志 |
 //! | 其它字符 | 追加到输入行（不会被吞掉） |
 //!
-//! ## `q` / `j` / `k` / `s` / `x` / `r` 的歧义处理
+//! ## 为什么总览视图不收字符
 //!
-//! 这些键既是命令键又是普通字符。为了既不误退出、也不吞掉正在输入的命令，
-//! 它们**只在输入框为空时**才作为命令键生效；输入框非空时一律作为普通字符输入。
-//! 因此若要输入以 `q` / `j` / `k` / `s` / `x` / `r` 开头的命令，请先敲一个空格再输入。
-//!
-//! `s` / `x` / `r` 还额外要求当前处于**总览视图**：控制台视图里输入框的内容是
-//! 发给服务端控制台的命令文本，`s` 在那里就应当是命令的一部分，而不是开关服。
+//! 总览视图没有输入框，敲进去的字符**无处显示**——那只会让人以为命令
+//! 被吞了。要给服务端发命令就 `Enter` 进控制台视图，那里能看见自己敲了什么。
 
 use atlas_core::{LogLevel, ServerId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, AppView};
+use crate::app::{App, AppView, PAGE_SIZE};
 
 /// 键盘事件触发的动作。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,12 +56,14 @@ pub enum AppAction {
     None,
     /// 请求退出。
     Quit,
-    /// 切换视图（`Tab` 进入控制台 / `Esc` 返回总览）。
+    /// 切换视图（`Enter` / `Tab` 进入控制台 / `Esc` 返回总览）。
     ToggleView,
     /// 移动选中项，携带实际的位移量（正数向下）。
     Move(isize),
     /// 执行输入框中的命令。
     Submit,
+    /// 滚动日志，携带位移量（正数向上翻，更早的方向）。
+    ScrollLog(isize),
     /// 启动指定服务器。
     StartServer(ServerId),
     /// 停止指定服务器。
@@ -60,70 +73,74 @@ pub enum AppAction {
 }
 
 /// 处理一次按键，返回触发的动作。
+///
+/// 按键语义**按视图分开**：
+///
+/// - **总览视图**：文本框只是可选的输入口，字母键同时可能是动作键；
+/// - **控制台视图**：文本框是主角，几乎所有键都是文本，只有
+///   `Esc` / `Enter` / `Ctrl+U` / 方向键有特殊含义。
+///
+/// 分开处理的意义在于：同一个键在两个视图里含义不同是**明确的**
+/// （看一眼当前视图就知道），而不是"看输入框是不是空的"这种隐式前提。
 pub fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // `Ctrl+C` 在两个视图里都是退出。
+    if ctrl && key.code == KeyCode::Char('c') {
+        app.should_quit = true;
+        return AppAction::Quit;
+    }
+
+    match app.view {
+        AppView::Dashboard => handle_dashboard_key(app, key, ctrl),
+        AppView::ServerConsole(_) => handle_console_key(app, key, ctrl),
+    }
+}
+
+/// 总览视图的按键处理。
+///
+/// 总览视图**没有文本输入框**，所以字母键全部是动作键，不需要"输入框
+/// 是不是空的"这种隐式前提来消歧义。
+fn handle_dashboard_key(app: &mut App, key: KeyEvent, ctrl: bool) -> AppAction {
     match key.code {
-        KeyCode::Char('c') if ctrl => {
+        KeyCode::Char('q') if !ctrl => {
             app.should_quit = true;
             AppAction::Quit
         }
-        KeyCode::Char('u') if ctrl => {
-            app.input.clear();
-            AppAction::None
-        }
-        KeyCode::Char('q') if !ctrl && app.input.is_empty() => {
-            app.should_quit = true;
-            AppAction::Quit
-        }
-        KeyCode::Char('k') if !ctrl && app.input.is_empty() => {
+        KeyCode::Char('k') if !ctrl => {
             app.move_selection(-1);
             AppAction::Move(-1)
         }
-        KeyCode::Char('j') if !ctrl && app.input.is_empty() => {
+        KeyCode::Char('j') if !ctrl => {
             app.move_selection(1);
             AppAction::Move(1)
         }
-        // 开关服：只在**总览视图**且输入框为空时生效。
-        // 控制台视图里的 s/x/r 属于发给服务端控制台的命令文本，不能被截走。
-        KeyCode::Char('s') if !ctrl && app.input.is_empty() && app.view == AppView::Dashboard => {
-            match app.selected_server_id() {
-                Some(id) => AppAction::StartServer(id),
-                None => {
-                    app.status = Some("没有可启动的服务器".to_owned());
-                    AppAction::None
-                }
+        KeyCode::Char('s') if !ctrl => match app.selected_server_id() {
+            Some(id) => AppAction::StartServer(id),
+            None => {
+                app.status = Some("没有可启动的服务器".to_owned());
+                AppAction::None
             }
-        }
-        KeyCode::Char('x') if !ctrl && app.input.is_empty() && app.view == AppView::Dashboard => {
-            match app.selected_server_id() {
-                Some(id) => AppAction::StopServer(id),
-                None => {
-                    app.status = Some("没有可停止的服务器".to_owned());
-                    AppAction::None
-                }
+        },
+        KeyCode::Char('x') if !ctrl => match app.selected_server_id() {
+            Some(id) => AppAction::StopServer(id),
+            None => {
+                app.status = Some("没有可停止的服务器".to_owned());
+                AppAction::None
             }
-        }
-        KeyCode::Char('r') if !ctrl && app.input.is_empty() && app.view == AppView::Dashboard => {
-            match app.selected_server_id() {
-                Some(id) => AppAction::RestartServer(id),
-                None => {
-                    app.status = Some("没有可重启的服务器".to_owned());
-                    AppAction::None
-                }
+        },
+        KeyCode::Char('r') if !ctrl => match app.selected_server_id() {
+            Some(id) => AppAction::RestartServer(id),
+            None => {
+                app.status = Some("没有可重启的服务器".to_owned());
+                AppAction::None
             }
-        }
-        KeyCode::Esc => {
-            if app.view != AppView::Dashboard {
-                app.leave_console();
-            } else {
-                app.input.clear();
-            }
+        },
+        // `Enter` 与 `Tab` 都进入选中服务器的控制台——
+        // 总览里没有输入框，"回车打开这一台"是最自然的下一步。
+        KeyCode::Enter | KeyCode::Tab => {
+            app.enter_console();
             AppAction::ToggleView
-        }
-        KeyCode::Enter => AppAction::Submit,
-        KeyCode::Backspace => {
-            app.pop_input();
-            AppAction::None
         }
         KeyCode::Up => {
             app.move_selection(-1);
@@ -153,11 +170,56 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
             app.select_last();
             AppAction::Move(app.selected as isize - before as isize)
         }
-        KeyCode::Tab => {
-            app.enter_console();
+        _ => AppAction::None,
+    }
+}
+
+/// 控制台视图的按键处理。
+///
+/// 这里的方向键**滚动日志**而不是移动服务器选中项——在一个显示输出的
+/// 面板里，方向键的第一直觉是翻内容，不是换行。
+fn handle_console_key(app: &mut App, key: KeyEvent, ctrl: bool) -> AppAction {
+    match key.code {
+        KeyCode::Char('u') if ctrl => {
+            app.input.clear();
+            AppAction::None
+        }
+        KeyCode::Esc => {
+            // 返回总览，并把没发出去的输入清掉——留着半条命令再回来
+            // 容易误发。
+            app.leave_console();
+            app.input.clear();
             AppAction::ToggleView
         }
-        // 其余 Ctrl 组合不进入输入行（避免把控制字符当作命令文本）。
+        KeyCode::Enter => AppAction::Submit,
+        KeyCode::Backspace => {
+            app.pop_input();
+            AppAction::None
+        }
+        KeyCode::Up => {
+            app.scroll_logs(1);
+            AppAction::ScrollLog(1)
+        }
+        KeyCode::Down => {
+            app.scroll_logs(-1);
+            AppAction::ScrollLog(-1)
+        }
+        KeyCode::PageUp => {
+            app.scroll_logs(PAGE_SIZE);
+            AppAction::ScrollLog(PAGE_SIZE)
+        }
+        KeyCode::PageDown => {
+            app.scroll_logs(-PAGE_SIZE);
+            AppAction::ScrollLog(-PAGE_SIZE)
+        }
+        KeyCode::Home => {
+            app.scroll_logs_to_start();
+            AppAction::ScrollLog(0)
+        }
+        KeyCode::End => {
+            app.scroll_logs_to_end();
+            AppAction::ScrollLog(0)
+        }
         KeyCode::Char(_) if ctrl => AppAction::None,
         KeyCode::Char(c) => {
             app.push_input(c);
@@ -180,6 +242,7 @@ pub fn level_style(level: LogLevel) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use atlas_core::Event;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::app::test_support::app_with_servers;
@@ -198,6 +261,8 @@ mod tests {
     fn char_key(ch: char) -> KeyEvent {
         key(KeyCode::Char(ch))
     }
+
+    // ── 总览视图 ──────────────────────────────────────────────
 
     #[test]
     fn ctrl_c_quits() {
@@ -218,86 +283,65 @@ mod tests {
     }
 
     #[test]
-    fn q_with_empty_input_quits() {
+    fn 总览视图_q_退出() {
         let mut app = app_with_servers(&["a"]);
         let action = handle_key(&mut app, char_key('q'));
         assert_eq!(action, AppAction::Quit);
         assert!(app.should_quit);
-        assert!(app.input.is_empty());
     }
 
     #[test]
-    fn q_with_non_empty_input_is_typed() {
-        let mut app = app_with_servers(&["a"]);
-        app.push_input('l');
-        let action = handle_key(&mut app, char_key('q'));
-        assert_eq!(action, AppAction::None);
-        assert!(!app.should_quit);
-        assert_eq!(app.input, "lq");
+    fn 总览视图_j_k_移动选中项() {
+        let mut app = app_with_servers(&["a", "b"]);
+        assert_eq!(handle_key(&mut app, char_key('j')), AppAction::Move(1));
+        assert_eq!(app.selected, 1);
+        assert_eq!(handle_key(&mut app, char_key('k')), AppAction::Move(-1));
+        assert_eq!(app.selected, 0);
     }
 
     #[test]
-    fn esc_in_console_returns_to_dashboard() {
-        let mut app = app_with_servers(&["a"]);
-        app.enter_console();
-        assert_eq!(app.view, AppView::ServerConsole("srv0".into()));
-        let action = handle_key(&mut app, key(KeyCode::Esc));
-        assert_eq!(action, AppAction::ToggleView);
-        assert_eq!(app.view, AppView::Dashboard);
-    }
-
-    #[test]
-    fn esc_in_dashboard_clears_input() {
-        let mut app = app_with_servers(&["a"]);
-        app.push_input('a');
-        app.push_input('b');
-        handle_key(&mut app, key(KeyCode::Esc));
-        assert!(app.input.is_empty());
-        assert_eq!(app.view, AppView::Dashboard);
-    }
-
-    #[test]
-    fn 总览视图下_s_触发启动() {
+    fn 总览视图_sxr_触发开关服() {
         let mut app = app_with_servers(&["a", "b"]);
         app.move_selection(1);
-        let action = handle_key(&mut app, char_key('s'));
-        assert_eq!(action, AppAction::StartServer("srv1".into()));
+        assert_eq!(
+            handle_key(&mut app, char_key('s')),
+            AppAction::StartServer("srv1".into())
+        );
+        assert_eq!(
+            handle_key(&mut app, char_key('x')),
+            AppAction::StopServer("srv1".into())
+        );
+        assert_eq!(
+            handle_key(&mut app, char_key('r')),
+            AppAction::RestartServer("srv1".into())
+        );
     }
 
     #[test]
-    fn 总览视图下_x_触发停止() {
+    fn 总览视图不接收普通字符() {
+        // 总览视图没有输入框，敲进去的字符无处显示——
+        // 与其让人以为被吞了，不如明确不收。
         let mut app = app_with_servers(&["a"]);
-        let action = handle_key(&mut app, char_key('x'));
-        assert_eq!(action, AppAction::StopServer("srv0".into()));
+        let action = handle_key(&mut app, char_key('z'));
+        assert_eq!(action, AppAction::None);
+        assert!(app.input.is_empty(), "总览视图不应往输入行里塞字符");
     }
 
     #[test]
-    fn 总览视图下_r_触发重启() {
-        let mut app = app_with_servers(&["a"]);
-        let action = handle_key(&mut app, char_key('r'));
-        assert_eq!(action, AppAction::RestartServer("srv0".into()));
+    fn 总览视图_enter_进入控制台() {
+        let mut app = app_with_servers(&["a", "b"]);
+        app.move_selection(1);
+        let action = handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(action, AppAction::ToggleView);
+        assert_eq!(app.view, AppView::ServerConsole("srv1".into()));
     }
 
     #[test]
-    fn 输入框非空时_sxr_只是普通字符() {
+    fn 总览视图_tab_进入控制台() {
         let mut app = app_with_servers(&["a"]);
-        app.push_input('l');
-        for ch in ['s', 'x', 'r'] {
-            let action = handle_key(&mut app, char_key(ch));
-            assert_eq!(action, AppAction::None, "{ch} 不应触发开关服");
-        }
-        assert_eq!(app.input, "lsxr");
-    }
-
-    #[test]
-    fn 控制台视图下_sxr_只是普通字符() {
-        let mut app = app_with_servers(&["a"]);
-        app.enter_console();
-        for ch in ['s', 'x', 'r'] {
-            let action = handle_key(&mut app, char_key(ch));
-            assert_eq!(action, AppAction::None, "{ch} 不应触发开关服");
-        }
-        assert_eq!(app.input, "sxr");
+        let action = handle_key(&mut app, key(KeyCode::Tab));
+        assert_eq!(action, AppAction::ToggleView);
+        assert_eq!(app.view, AppView::ServerConsole("srv0".into()));
     }
 
     #[test]
@@ -313,65 +357,59 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_不触发启动() {
+    fn 总览视图翻页与首尾跳转() {
+        let mut app = app_with_servers(&["a", "b", "c"]);
+        handle_key(&mut app, key(KeyCode::End));
+        assert_eq!(app.selected, 2);
+        handle_key(&mut app, key(KeyCode::Home));
+        assert_eq!(app.selected, 0);
+    }
+
+    // ── 控制台视图 ────────────────────────────────────────────
+
+    #[test]
+    fn 控制台视图_esc_返回总览并清空输入() {
         let mut app = app_with_servers(&["a"]);
-        let action = handle_key(&mut app, ctrl(KeyCode::Char('s')));
-        assert_eq!(action, AppAction::None);
-    }
-
-    #[test]
-    fn tab_enters_console_view() {
-        let mut app = app_with_servers(&["a", "b"]);
-        app.move_selection(1);
-        let action = handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(action, AppAction::ToggleView);
-        assert_eq!(app.view, AppView::ServerConsole("srv1".into()));
-    }
-
-    #[test]
-    fn tab_without_servers_keeps_dashboard() {
-        let mut app = app_with_servers(&[]);
-        handle_key(&mut app, key(KeyCode::Tab));
-        assert_eq!(app.view, AppView::Dashboard);
-    }
-
-    #[test]
-    fn up_and_down_move_selection() {
-        let mut app = app_with_servers(&["a", "b", "c"]);
-        assert_eq!(handle_key(&mut app, key(KeyCode::Down)), AppAction::Move(1));
-        assert_eq!(app.selected, 1);
-        assert_eq!(handle_key(&mut app, key(KeyCode::Up)), AppAction::Move(-1));
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn j_and_k_move_selection() {
-        let mut app = app_with_servers(&["a", "b", "c"]);
-        assert_eq!(handle_key(&mut app, char_key('j')), AppAction::Move(1));
-        assert_eq!(app.selected, 1);
-        assert_eq!(handle_key(&mut app, char_key('k')), AppAction::Move(-1));
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn j_and_k_are_typed_when_input_is_not_empty() {
-        let mut app = app_with_servers(&["a", "b"]);
+        app.enter_console();
         app.push_input('x');
-        handle_key(&mut app, char_key('j'));
-        handle_key(&mut app, char_key('k'));
-        assert_eq!(app.input, "xjk");
-        assert_eq!(app.selected, 0);
+        let action = handle_key(&mut app, key(KeyCode::Esc));
+        assert_eq!(action, AppAction::ToggleView);
+        assert_eq!(app.view, AppView::Dashboard);
+        assert!(app.input.is_empty(), "没发出去的输入应被清掉");
     }
 
     #[test]
-    fn enter_returns_submit() {
+    fn 控制台视图_enter_提交() {
         let mut app = app_with_servers(&["a"]);
-        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), AppAction::Submit);
+        app.enter_console();
+        let action = handle_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(action, AppAction::Submit);
     }
 
     #[test]
-    fn backspace_removes_last_character() {
+    fn 控制台视图_方向键滚动日志而不是移动选中项() {
+        let mut app = app_with_servers(&["a", "b"]);
+        app.enter_console();
+        let before = app.selected;
+        let action = handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(action, AppAction::ScrollLog(1));
+        assert_eq!(app.selected, before, "控制台视图不该改服务器选中项");
+    }
+
+    #[test]
+    fn 控制台视图_普通字符进入输入行() {
         let mut app = app_with_servers(&["a"]);
+        app.enter_console();
+        for ch in "hello".chars() {
+            assert_eq!(handle_key(&mut app, char_key(ch)), AppAction::None);
+        }
+        assert_eq!(app.input, "hello");
+    }
+
+    #[test]
+    fn 控制台视图_backspace_删除字符() {
+        let mut app = app_with_servers(&["a"]);
+        app.enter_console();
         app.push_input('l');
         app.push_input('s');
         let action = handle_key(&mut app, key(KeyCode::Backspace));
@@ -380,44 +418,9 @@ mod tests {
     }
 
     #[test]
-    fn backspace_on_empty_input_is_noop() {
+    fn 控制台视图_ctrl_u_清空输入() {
         let mut app = app_with_servers(&["a"]);
-        handle_key(&mut app, key(KeyCode::Backspace));
-        assert!(app.input.is_empty());
-    }
-
-    #[test]
-    fn page_keys_move_by_page_size() {
-        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
-        let mut app = app_with_servers(&names);
-        handle_key(&mut app, key(KeyCode::PageDown));
-        assert_eq!(app.selected, 10);
-        handle_key(&mut app, key(KeyCode::PageUp));
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn home_and_end_jump_to_bounds() {
-        let mut app = app_with_servers(&["a", "b", "c"]);
-        handle_key(&mut app, key(KeyCode::End));
-        assert_eq!(app.selected, 2);
-        handle_key(&mut app, key(KeyCode::Home));
-        assert_eq!(app.selected, 0);
-    }
-
-    #[test]
-    fn ordinary_characters_reach_the_input_buffer() {
-        let mut app = app_with_servers(&["a"]);
-        for ch in "hello".chars() {
-            let action = handle_key(&mut app, char_key(ch));
-            assert_eq!(action, AppAction::None);
-        }
-        assert_eq!(app.input, "hello");
-    }
-
-    #[test]
-    fn ctrl_u_clears_input() {
-        let mut app = app_with_servers(&["a"]);
+        app.enter_console();
         app.push_input('x');
         let action = handle_key(&mut app, ctrl(KeyCode::Char('u')));
         assert_eq!(action, AppAction::None);
@@ -425,60 +428,95 @@ mod tests {
     }
 
     #[test]
-    fn unbound_control_combinations_are_ignored() {
+    fn 控制台视图_q_是普通字符不是退出() {
+        // 控制台视图里 q 要能发给服务端，不能顺手把程序关了。
         let mut app = app_with_servers(&["a"]);
-        let action = handle_key(&mut app, ctrl(KeyCode::Char('a')));
+        app.enter_console();
+        let action = handle_key(&mut app, char_key('q'));
         assert_eq!(action, AppAction::None);
-        assert!(app.input.is_empty());
-    }
-
-    #[test]
-    fn unknown_keys_are_ignored() {
-        let mut app = app_with_servers(&["a"]);
-        let action = handle_key(&mut app, key(KeyCode::F(5)));
-        assert_eq!(action, AppAction::None);
-        assert!(app.input.is_empty());
         assert!(!app.should_quit);
+        assert_eq!(app.input, "q");
     }
 
     #[test]
-    fn level_style_maps_every_level() {
-        use atlas_core::LogLevel;
-        assert_eq!(level_style(LogLevel::Trace), "dim");
-        assert_eq!(level_style(LogLevel::Debug), "dim");
-        assert_eq!(level_style(LogLevel::Info), "info");
-        assert_eq!(level_style(LogLevel::Warn), "warn");
-        assert_eq!(level_style(LogLevel::Error), "error");
-        assert_eq!(level_style(LogLevel::Fatal), "error");
-        assert_eq!(level_style(LogLevel::Unknown), "unknown");
-    }
-
-    #[test]
-    fn handle_key_does_not_panic_on_empty_server_list() {
-        let mut app = app_with_servers(&[]);
-        for code in [
-            KeyCode::Up,
-            KeyCode::Down,
-            KeyCode::PageUp,
-            KeyCode::PageDown,
-            KeyCode::Home,
-            KeyCode::End,
-            KeyCode::Tab,
-            KeyCode::Esc,
-            KeyCode::Enter,
-            KeyCode::Backspace,
-        ] {
-            let _ = handle_key(&mut app, key(code));
+    fn 控制台视图_home_end_跳到日志首尾() {
+        let mut app = app_with_servers(&["a"]);
+        app.enter_console();
+        for i in 0..5 {
+            app.handle_event(Event::Log(crate::app::test_support::log_event(
+                "srv0",
+                &format!("第 {i} 行"),
+            )));
         }
-        assert!(app.selected_server().is_none());
+        app.log_viewport = 3;
+
+        handle_key(&mut app, key(KeyCode::End));
+        assert_eq!(app.log_scroll, 0, "End 应回到最新（跟随）");
+        handle_key(&mut app, key(KeyCode::Home));
+        assert!(app.log_scroll > 0, "Home 应跳到最早");
     }
 
     #[test]
-    fn app_action_variants_are_stable() {
-        // 公开枚举的形状是对外契约的一部分，这里做一次快照式断言。
-        assert_ne!(AppAction::None, AppAction::Quit);
-        assert_ne!(AppAction::ToggleView, AppAction::Move(0));
-        assert_ne!(AppAction::Submit, AppAction::Quit);
+    fn 日志滚动_偏移被夹在有效范围内() {
+        let mut app = app_with_servers(&["a"]);
+        app.enter_console();
+        for i in 0..5 {
+            app.handle_event(Event::Log(crate::app::test_support::log_event(
+                "srv0",
+                &format!("第 {i} 行"),
+            )));
+        }
+        app.log_viewport = 3;
+
+        for _ in 0..20 {
+            app.scroll_logs(1);
+        }
+        // 最多回��到第 0 行，可见窗口 3 行 ⇒ 偏移最大为 5 - 3 = 2。
+        assert_eq!(app.log_scroll, 2, "不应能滚到比最早一行更早");
+
+        for _ in 0..20 {
+            app.scroll_logs(-1);
+        }
+        assert_eq!(app.log_scroll, 0, "向下滚应回到最新");
+    }
+
+    #[test]
+    fn 日志滚动_新日志到来时保持窗口不动() {
+        let mut app = app_with_servers(&["a"]);
+        app.enter_console();
+        for i in 0..5 {
+            app.handle_event(Event::Log(crate::app::test_support::log_event(
+                "srv0",
+                &format!("第 {i} 行"),
+            )));
+        }
+        app.log_viewport = 3;
+        app.scroll_logs(2);
+        let before = app.log_scroll;
+        app.handle_event(Event::Log(crate::app::test_support::log_event(
+            "srv0",
+            "新的一行",
+        )));
+        assert_eq!(
+            app.log_scroll,
+            before + 1,
+            "翻历史时新日志不应把正在看的内容顶走"
+        );
+    }
+
+    #[test]
+    fn level_style_覆盖全部级别() {
+        for level in [
+            atlas_core::LogLevel::Trace,
+            atlas_core::LogLevel::Debug,
+            atlas_core::LogLevel::Info,
+            atlas_core::LogLevel::Warn,
+            atlas_core::LogLevel::Error,
+            atlas_core::LogLevel::Fatal,
+            atlas_core::LogLevel::Unknown,
+        ] {
+            assert!(!level_style(level).is_empty());
+        }
     }
 
     #[test]

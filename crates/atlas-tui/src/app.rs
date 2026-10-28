@@ -60,6 +60,16 @@ pub struct App {
     pub status: Option<String>,
     /// 是否请求退出。
     pub should_quit: bool,
+    /// 日志视图的滚动偏移：**距离末尾**多少行（`0` = 贴底跟随新输出）。
+    ///
+    /// 用"距末尾"而不是"距开头"：新日志进来时末尾会动，绝对偏移会让
+    /// 正在翻历史的用户被推着走。
+    pub log_scroll: usize,
+    /// 日志面板的可见行数。
+    ///
+    /// 由渲染时回填（面板高度随终端尺寸变化），滚动偏移要靠它才能
+    /// 正确地夹在「最早一行」与「最新一行」之间。
+    pub log_viewport: usize,
 }
 
 impl App {
@@ -88,18 +98,25 @@ impl App {
             input: String::new(),
             status: None,
             should_quit: false,
+            log_scroll: 0,
+            log_viewport: 0,
         }
     }
 
     /// 处理一个事件。
     ///
     /// - [`Event::Log`]：入队日志缓冲，超过 [`MAX_LOG_LINES`] 时淘汰最旧的一条。
+    ///   用户正在翻历史时（[`App::log_scroll`] > 0）同步把偏移加一行，
+    ///   这样新日志不会把正在看的内容顶走。
     /// - [`Event::ServerState`]：更新对应服务器的运行状态（找不到则忽略）。
     /// - [`Event::Command`]：把命令执行信息写入状态栏。
     /// - [`Event::Status`]：把提示原文写入状态栏。
     pub fn handle_event(&mut self, event: Event) {
         match event {
             Event::Log(log) => {
+                if self.log_scroll > 0 {
+                    self.log_scroll += 1;
+                }
                 self.logs.push_back(log);
                 while self.logs.len() > MAX_LOG_LINES {
                     self.logs.pop_front();
@@ -216,6 +233,39 @@ impl App {
     /// 取出并清空输入。
     pub fn take_input(&mut self) -> String {
         std::mem::take(&mut self.input)
+    }
+
+    /// 当前视图对应的日志条数。
+    ///
+    /// 总览视图没有日志面板，返回 `0`。
+    pub fn log_line_count(&self) -> usize {
+        match &self.view {
+            AppView::ServerConsole(id) => self.logs.iter().filter(|l| &l.server == id).count(),
+            AppView::Dashboard => 0,
+        }
+    }
+
+    /// 滚动日志。
+    ///
+    /// `delta` 为正表示往**更早**的方向翻（向上），为负表示往更新的方向（向下）。
+    /// 偏移被夹在「最早一行」与「最新一行」之间，不会滚过头。
+    pub fn scroll_logs(&mut self, delta: isize) {
+        let total = self.log_line_count();
+        // 可视窗口之外的行滚不到：最远只能回到第一行。
+        let max = total.saturating_sub(self.log_viewport.min(total));
+        let next = self.log_scroll as isize + delta;
+        self.log_scroll = next.clamp(0, max as isize) as usize;
+    }
+
+    /// 跳到最新的日志（恢复跟随）。
+    pub fn scroll_logs_to_end(&mut self) {
+        self.log_scroll = 0;
+    }
+
+    /// 跳到最早的日志。
+    pub fn scroll_logs_to_start(&mut self) {
+        let total = self.log_line_count();
+        self.log_scroll = total.saturating_sub(self.log_viewport.min(total));
     }
 }
 

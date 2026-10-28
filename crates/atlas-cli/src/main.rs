@@ -919,6 +919,18 @@ async fn run_tui(atlas: &mut Atlas) -> Result<()> {
     let mut terminal = ratatui::init();
     let result = tui_loop(&mut terminal, &mut app, atlas, &mut bus_rx, &mut key_stream).await;
     ratatui::restore();
+
+    // 退出 TUI 也要**优雅停止**服务器。
+    //
+    // 直接返回的话，`ManagedServer` 会被 drop，而子进程是 `kill_on_drop(true)`
+    // ——等于硬杀 Minecraft 服务端，可能丢世界存档。`atlas start` 的 Ctrl+C
+    // 走的是优雅停止路径，这里必须一致：用户按 `q` 和按 Ctrl+C 不该有
+    // 不同的数据安全后果。
+    let errors = atlas.supervisor.stop_all().await;
+    for (id, e) in errors {
+        eprintln!("停止 {id} 失败: {e}");
+    }
+
     result
 }
 
@@ -934,7 +946,7 @@ async fn tui_loop(
     use futures::StreamExt;
 
     loop {
-        terminal.draw(|frame| atlas_tui::render(frame, app))?;
+        terminal.draw(|frame| atlas_tui::render(frame, &mut *app))?;
 
         tokio::select! {
             maybe = key_stream.next() => {
@@ -968,7 +980,10 @@ async fn tui_loop(
                             Err(e) => app.status = Some(format!("重启 {id} 失败: {e}")),
                         }
                     }
-                    AppAction::ToggleView | AppAction::Move(_) | AppAction::None => {}
+                    AppAction::ToggleView
+                    | AppAction::Move(_)
+                    | AppAction::ScrollLog(_)
+                    | AppAction::None => {}
                 }
             }
             outcome = atlas_core::EventBus::recv(bus_rx) => {
