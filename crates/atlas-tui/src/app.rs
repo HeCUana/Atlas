@@ -77,6 +77,42 @@ pub struct App {
     /// 构造时按终端实际能力降级过（真彩色 → 256 色 → 基础 16 色 → 无颜色），
     /// 界面里只用它的语义角色，不直接写死颜色。
     pub theme: Theme,
+    /// 待确认的危险操作。
+    ///
+    /// 停止 / 重启服务器会中断在线玩家，属于**不可忽略**的操作——
+    /// 手滑按错一次键就让人踢下线，这种事不能没有二次确认。
+    /// 确认期间界面会显示提示条，`y` 确认、其它键取消。
+    pub pending: Option<PendingAction>,
+    /// 快捷键备忘面板是否打开。
+    ///
+    /// 提示行只列当前视图的键位，想要一次看全时按 `?`。
+    pub help_open: bool,
+}
+
+/// 一个等待用户确认的操作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingAction {
+    /// 停止服务器。
+    Stop(ServerId),
+    /// 重启服务器。
+    Restart(ServerId),
+}
+
+impl PendingAction {
+    /// 这项操作要作用在哪个服务器上。
+    pub fn server(&self) -> &ServerId {
+        match self {
+            Self::Stop(id) | Self::Restart(id) => id,
+        }
+    }
+
+    /// 动作的中文名称。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Stop(_) => "停止",
+            Self::Restart(_) => "重启",
+        }
+    }
 }
 
 impl App {
@@ -118,6 +154,20 @@ impl App {
             log_scroll: 0,
             log_viewport: 0,
             theme,
+            pending: None,
+            help_open: false,
+        }
+    }
+
+    /// 是否有待确认的危险操作。
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// 取消待确认的操作。
+    pub fn cancel_pending(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.status = Some(format!("已取消{}", pending.label()));
         }
     }
 

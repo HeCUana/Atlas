@@ -969,24 +969,38 @@ async fn tui_loop(
                         }
                     }
                     AppAction::StartServer(id) => {
+                        // 先给反馈再干活：启动可能要拉起 JVM，
+                        // 让用户知道"按了有反应"，而不是界面干等着。
+                        app.status = Some(format!("正在启动 {id}…"));
                         match atlas.supervisor.start(id.as_str()).await {
                             Ok(()) => app.status = Some(format!("已启动 {id}")),
-                            Err(e) => app.status = Some(format!("启动 {id} 失败: {e}")),
+                            Err(e) => {
+                                app.status = Some(format!("启动 {id} 失败：{e}{}", failure_hint(&e)))
+                            }
                         }
                     }
                     AppAction::StopServer(id) => {
+                        // 停止可能要等进程自行退出（最长 30 秒），
+                        // 这段时间必须有明确的进度提示。
+                        app.status = Some(format!("正在停止 {id}…"));
                         match atlas.supervisor.stop(id.as_str()).await {
                             Ok(()) => app.status = Some(format!("已停止 {id}")),
-                            Err(e) => app.status = Some(format!("停止 {id} 失败: {e}")),
+                            Err(e) => {
+                                app.status = Some(format!("停止 {id} 失败：{e}{}", failure_hint(&e)))
+                            }
                         }
                     }
                     AppAction::RestartServer(id) => {
+                        app.status = Some(format!("正在重启 {id}…"));
                         match atlas.supervisor.restart(id.as_str()).await {
                             Ok(()) => app.status = Some(format!("已重启 {id}")),
-                            Err(e) => app.status = Some(format!("重启 {id} 失败: {e}")),
+                            Err(e) => {
+                                app.status = Some(format!("重启 {id} 失败：{e}{}", failure_hint(&e)))
+                            }
                         }
                     }
-                    AppAction::ToggleView
+                    AppAction::ToggleHelp
+                    | AppAction::ToggleView
                     | AppAction::Move(_)
                     | AppAction::ScrollLog(_)
                     | AppAction::None => {}
@@ -1017,15 +1031,15 @@ async fn apply_intent(atlas: &mut Atlas, intent: remote::Intent) {
     match intent {
         Intent::Start(id) => match atlas.supervisor.start(&id).await {
             Ok(()) => publish_status(&atlas.bus, &id, format!("已启动 {id}")),
-            Err(e) => publish_status(&atlas.bus, &id, format!("启动 {id} 失败: {e}")),
+            Err(e) => publish_failure(&atlas.bus, &id, "启动", &e),
         },
         Intent::Stop(id) => match atlas.supervisor.stop(&id).await {
             Ok(()) => publish_status(&atlas.bus, &id, format!("已停止 {id}")),
-            Err(e) => publish_status(&atlas.bus, &id, format!("停止 {id} 失败: {e}")),
+            Err(e) => publish_failure(&atlas.bus, &id, "停止", &e),
         },
         Intent::Restart(id) => match atlas.supervisor.restart(&id).await {
             Ok(()) => publish_status(&atlas.bus, &id, format!("已重启 {id}")),
-            Err(e) => publish_status(&atlas.bus, &id, format!("重启 {id} 失败: {e}")),
+            Err(e) => publish_failure(&atlas.bus, &id, "重启", &e),
         },
         Intent::Execute { server, line } => {
             remote::execute_command(&mut atlas.supervisor, &atlas.bus, &server, &line).await;
@@ -1040,6 +1054,35 @@ fn publish_status(bus: &EventBus, server: &str, text: String) {
         text: text.clone(),
     });
     tracing::info!("[{server}] {text}");
+}
+
+/// 给操作失败补一句**能照着做的**建议。
+///
+/// 只说"失败了"没用——运维还得自己猜下一步。补上原因和建议，
+/// 错误信息才真的能帮人解决问题。
+fn failure_hint(error: &atlas_core::AtlasError) -> String {
+    match error {
+        atlas_core::AtlasError::NotManaged(_) => {
+            "（该服务器不由本进程托管，请在托管它的那个 Atlas 里操作）".to_owned()
+        }
+        atlas_core::AtlasError::UnknownServer(_) => {
+            "（配置里没有这台服务器，检查 atlas.toml 的 [[servers]]）".to_owned()
+        }
+        atlas_core::AtlasError::PermissionDenied { .. } => {
+            "（权限不足，检查 Atlas 的授权配置）".to_owned()
+        }
+        _ => String::new(),
+    }
+}
+
+/// 把一条失败结果连同建议发布到事件总线。
+fn publish_failure(bus: &EventBus, server: &str, action: &str, error: &atlas_core::AtlasError) {
+    let hint = failure_hint(error);
+    publish_status(
+        bus,
+        server,
+        format!("{action} {server} 失败：{error}{hint}"),
+    );
 }
 
 /// 刷新各服务器的当前状态快照。

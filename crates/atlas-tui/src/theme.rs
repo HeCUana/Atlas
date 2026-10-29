@@ -147,21 +147,35 @@ enum ColorKind {
 
 /// 语义调色板。
 ///
-/// 界面只用这里定义的 9 个角色，不直接写死 `Color::Green` 之类。
+/// 界面只用这里定义的**语义角色**，不直接写死 `Color::Green` 之类。
+///
+/// **主色调只有 5 种**（绿 / 黄 / 红 / 蓝 / 灰），加上终端默认前景色：
+///
+/// | 角色 | 含义 | 颜色 |
+/// | --- | --- | --- |
+/// | `running` | 成功 / 运行中 | 绿 |
+/// | `transitional` / `warning` | 警告 / 提示 / 进行中 | 黄 |
+/// | `failed` | 错误 / 危险 | 红 |
+/// | `accent` | 可交互元素 | 蓝 |
+/// | `muted` / `stopped` | 次要信息 | 灰 |
+/// | `text` | 正文 | **终端默认前景色** |
+///
+/// 正文用终端默认色而不是白色：一是**对比度最高**（跟着用户的终端主题走），
+/// 二是把主色调数量控制在 5 种以内——主色调太多会互相削弱，反而看不清重点。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     depth: ColorDepth,
-    /// 正文。
+    /// 正文（终端默认前景色）。
     pub text: Color,
-    /// 次要信息（详情行、提示行）。
+    /// 次要信息（详情行、提示行、已停止）。
     pub muted: Color,
-    /// 强调色（标题、输入提示符）。
+    /// 可交互元素（标题、输入提示符）。
     pub accent: Color,
-    /// 运行中。
+    /// 运行中 / 成功。
     pub running: Color,
-    /// 过渡态（启动中 / 停止中）。
+    /// 过渡态（启动中 / 停止中）与警告。
     pub transitional: Color,
-    /// 失败。
+    /// 失败 / 危险。
     pub failed: Color,
     /// 已停止。
     pub stopped: Color,
@@ -192,8 +206,12 @@ impl Theme {
             },
             ColorDepth::Basic => Self {
                 depth,
-                text: Color::White,
+                // 正文用终端默认色：对比度最高，且不占主色调名额。
+                text: Color::Reset,
                 muted: Color::Gray,
+                // 16 色板里没有更亮的蓝——`LightBlue` 对深色背景只有 4.13:1，
+                // 达不到 4.5:1。青色是同等亮度里对比度够的最近选择
+                // （17.1:1），语义上仍是"可交互元素"的强调色。
                 accent: Color::LightCyan,
                 running: Color::LightGreen,
                 transitional: Color::LightYellow,
@@ -204,32 +222,24 @@ impl Theme {
             // 256 色与真彩色用同一套 RGB 值——256 色的立方体里能找到
             // 足够接近的颜色，降级由 `downgrade` 完成。
             ColorDepth::Ansi256 | ColorDepth::TrueColor => {
-                let palette = [
-                    (220, 223, 228), // text
-                    (140, 146, 158), // muted
-                    (97, 175, 239),  // accent
-                    (126, 209, 125), // running
-                    (229, 192, 123), // transitional
-                    (240, 113, 120), // failed
-                    (120, 128, 140), // stopped
-                    (229, 192, 123), // warning
-                ];
-                let mut colors = palette.map(|rgb| Color::Rgb(rgb.0, rgb.1, rgb.2));
-                let mut idx = 0;
-                while idx < colors.len() {
-                    colors[idx] = downgrade(colors[idx], depth);
-                    idx += 1;
-                }
+                let muted = downgrade(Color::Rgb(140, 146, 158), depth);
+                let accent = downgrade(Color::Rgb(97, 175, 239), depth);
+                let running = downgrade(Color::Rgb(126, 209, 125), depth);
+                let transitional = downgrade(Color::Rgb(229, 192, 123), depth);
+                let failed = downgrade(Color::Rgb(240, 113, 120), depth);
                 Self {
                     depth,
-                    text: colors[0],
-                    muted: colors[1],
-                    accent: colors[2],
-                    running: colors[3],
-                    transitional: colors[4],
-                    failed: colors[5],
-                    stopped: colors[6],
-                    warning: colors[7],
+                    // 正文用终端默认色：对比度最高，且不占主色调名额。
+                    text: Color::Reset,
+                    muted,
+                    accent,
+                    running,
+                    transitional,
+                    failed,
+                    // 「已停止」与次要信息同色——它是中性状态，
+                    // 靠符号 `○` 和文字区分，不额外占一个主色调。
+                    stopped: muted,
+                    warning: transitional,
                 }
             }
         }
@@ -533,11 +543,50 @@ mod tests {
             ("stopped", theme.stopped),
             ("warning", theme.warning),
         ] {
+            // 正文是终端默认色（`Reset`），对比度由用户的终端主题决定——
+            // 那本来就是最高的一档，这里无可测。
+            if color == Color::Reset {
+                continue;
+            }
             let ratio = contrast_against_dark_background(color)
                 .unwrap_or_else(|| panic!("{name} 应有参考 RGB"));
             assert!(
                 ratio >= MIN_CONTRAST,
                 "{name} 的对比度 {ratio:.2} 低于 {MIN_CONTRAST}"
+            );
+        }
+    }
+
+    #[test]
+    fn 主色调不超过五种() {
+        // 主色调太多会互相削弱、看不出重点。约定只留
+        // 绿（成功）/ 黄（警告）/ 红（错误）/ 蓝（可交互）/ 灰（次要）五种。
+        for depth in [
+            ColorDepth::None,
+            ColorDepth::Basic,
+            ColorDepth::Ansi256,
+            ColorDepth::TrueColor,
+        ] {
+            let theme = Theme::for_depth(depth);
+            let roles = [
+                ("muted", theme.muted),
+                ("accent", theme.accent),
+                ("running", theme.running),
+                ("transitional", theme.transitional),
+                ("failed", theme.failed),
+                ("stopped", theme.stopped),
+                ("warning", theme.warning),
+            ];
+            let mut unique: Vec<Color> = Vec::new();
+            for (_, color) in roles {
+                if color != Color::Reset && !unique.contains(&color) {
+                    unique.push(color);
+                }
+            }
+            assert!(
+                unique.len() <= 5,
+                "{depth:?} 用到了 {} 种主色调：{unique:?}",
+                unique.len()
             );
         }
     }
@@ -638,6 +687,10 @@ mod tests {
             theme.stopped,
             theme.warning,
         ] {
+            // 正文是终端默认色，不占主色调名额。
+            if color == Color::Reset {
+                continue;
+            }
             let index = named_index(color).unwrap_or_else(|| panic!("{color:?} 应是具名基础色"));
             assert!(index < 16, "{color:?} 的索引 {index} 超出 16 色范围");
         }

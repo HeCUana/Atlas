@@ -60,15 +60,82 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .split(area);
 
     render_title(frame, chunks[0], app);
-    // 先把视图克隆出来再借出 `app`：`render_console` 需要 `&mut App`
-    // （回填日志面板的可见行数），与 `&app.view` 的不可变借用冲突。
-    match app.view.clone() {
-        AppView::Dashboard => render_dashboard(frame, chunks[1], app),
-        AppView::ServerConsole(id) => render_console(frame, chunks[1], app, &id),
+    // 帮助面板打开时，主体让位给它。
+    if app.help_open {
+        render_help(frame, chunks[1], app);
+    } else {
+        // 先把视图克隆出来再借出 `app`：`render_console` 需要 `&mut App`
+        // （回填日志面板的可见行数），与 `&app.view` 的不可变借用冲突。
+        match app.view.clone() {
+            AppView::Dashboard => render_dashboard(frame, chunks[1], app),
+            AppView::ServerConsole(id) => render_console(frame, chunks[1], app, &id),
+        }
     }
     render_detail(frame, chunks[2], app);
     render_status(frame, chunks[3], app);
     render_hints(frame, chunks[4], app);
+}
+
+/// 快捷键备忘面板。
+///
+/// 提示行只列**当前视图**能用的键；想一次看全时按 `?`。
+fn render_help(frame: &mut Frame, area: Rect, app: &App) {
+    let groups: [(&str, &[(&str, &str)]); 3] = [
+        (
+            "总览",
+            &[
+                ("↑ / ↓  或  k / j", "移动选中项"),
+                ("PageUp / PageDown", "翻页"),
+                ("Home / End", "跳到首行 / 末行"),
+                ("Enter / Tab", "进入控制台"),
+                ("s", "启动选中的服务器"),
+                ("x", "停止选中的服务器（需确认）"),
+                ("r", "重启选中的服务器（需确认）"),
+            ],
+        ),
+        (
+            "控制台",
+            &[
+                ("任意字符", "输入命令"),
+                ("Enter", "发送到服务器控制台"),
+                ("Esc", "返回总览"),
+                ("↑ / ↓", "滚动日志"),
+                ("PageUp / PageDown", "翻页滚动日志"),
+                ("Home / End", "跳到最早 / 最新的日志"),
+                ("Ctrl+U", "清空输入行"),
+            ],
+        ),
+        (
+            "通用",
+            &[
+                ("?", "打开 / 关闭本面板"),
+                ("Ctrl+C", "退出"),
+                ("q", "退出（仅总览视图）"),
+            ],
+        ),
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (title, items) in groups {
+        lines.push(Line::from(Span::styled(
+            title.to_owned(),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, desc) in items {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {key:<22}")),
+                Span::styled(desc.to_owned(), Style::default().fg(app.theme.muted)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("快捷键"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 /// 标题行：左边视图名，右边状态概要。
@@ -288,14 +355,25 @@ fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// 状态行：最近一次操作的结果。
+/// 状态行：最近一次操作的结果，或待确认的危险操作提示。
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (text, color) = match &app.status {
-        Some(message) => (message.clone(), app.theme.warning),
-        None => ("就绪".to_owned(), app.theme.muted),
+    let (text, color) = if let Some(pending) = &app.pending {
+        (
+            format!(
+                "⚠ 确认{} {}？  [y] 确认 · [n/Esc] 取消",
+                pending.label(),
+                pending.server()
+            ),
+            app.theme.warning,
+        )
+    } else {
+        match &app.status {
+            Some(message) => (message.clone(), app.theme.warning),
+            None => ("就绪".to_owned(), app.theme.muted),
+        }
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color)))),
@@ -310,9 +388,17 @@ fn render_hints(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let hints = match &app.view {
-        AppView::Dashboard => "↑↓ 选择 · Enter 控制台 · s 启动 · x 停止 · r 重启 · q 退出",
-        AppView::ServerConsole(_) => "Esc 返回 · Enter 发送 · ↑↓ 滚动日志 · Ctrl+C 退出",
+    let hints = if app.help_open {
+        "Esc 或 ? 关闭本面板"
+    } else {
+        match &app.view {
+            AppView::Dashboard => {
+                "↑↓ 选择 · Enter 控制台 · s 启动 · x 停止 · r 重启 · ? 快捷键 · q 退出"
+            }
+            AppView::ServerConsole(_) => {
+                "Esc 返回 · Enter 发送 · ↑↓ 滚动日志 · ? 快捷键 · Ctrl+C 退出"
+            }
+        }
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -359,6 +445,7 @@ mod tests {
     use ratatui::text::Span;
 
     use crate::app::App;
+    use crate::app::PendingAction;
     use crate::app::test_support::{app_with_servers, log_event};
     use crate::theme::{ColorDepth, Theme};
 
@@ -632,6 +719,50 @@ mod tests {
         assert!(
             buffer.content().iter().any(|c| c.fg == expected),
             "状态行应使用主题的运行中颜色 {expected:?}"
+        );
+    }
+
+    #[test]
+    fn 待确认时状态行显示确认提示() {
+        let mut app = app_with_servers(&["生存服"]);
+        app.pending = Some(PendingAction::Stop("srv0".into()));
+        let text = render_text(&mut app, 80, 24);
+        assert!(text.contains("确认停止 srv0"), "应显示确认提示:\n{text}");
+        assert!(text.contains("[y]"), "应说明怎么确认:\n{text}");
+        assert!(text.contains("[n/Esc]"), "应说明怎么取消:\n{text}");
+    }
+
+    #[test]
+    fn 帮助面板列出两个视图的键位() {
+        let mut app = app_with_servers(&["生存服"]);
+        app.help_open = true;
+        let text = render_text(&mut app, 80, 30);
+        assert!(text.contains("快捷键"), "应显示面板标题:\n{text}");
+        assert!(text.contains("总览"), "应列出总览视图的键位:\n{text}");
+        assert!(text.contains("控制台"), "应列出控制台视图的键位:\n{text}");
+        assert!(text.contains("滚动日志"), "应提到滚动日志:\n{text}");
+    }
+
+    #[test]
+    fn 布局随终端尺寸变化() {
+        // 响应式：窄终端与宽终端下，主体区域应当随之伸缩。
+        let mut narrow = app_with_servers(&["生存服"]);
+        let narrow_text = render_text(&mut narrow, 40, 12);
+        let mut wide = app_with_servers(&["生存服"]);
+        let wide_text = render_text(&mut wide, 100, 12);
+        let narrow_width = narrow_text.lines().next().unwrap_or("").chars().count();
+        let wide_width = wide_text.lines().next().unwrap_or("").chars().count();
+        assert!(
+            wide_width > narrow_width,
+            "宽终端的首行应更长：{narrow_width} vs {wide_width}"
+        );
+        assert!(
+            narrow_text.contains("生存服"),
+            "窄终端也应看到服务器:\n{narrow_text}"
+        );
+        assert!(
+            wide_text.contains("生存服"),
+            "宽终端也应看到服务器:\n{wide_text}"
         );
     }
 

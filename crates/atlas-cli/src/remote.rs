@@ -512,15 +512,24 @@ async fn handle_key(
             });
         }
         AppAction::StartServer(id) => {
+            // 先给反馈再干活：真正的动作在主循环里执行，
+            // 结果经事件总线回来。这里先把"正在做"显示出来。
+            app.status = Some(format!("正在启动 {id}…"));
             send_intent(shared, Intent::Start(id.to_string()));
         }
         AppAction::StopServer(id) => {
+            app.status = Some(format!("正在停止 {id}…"));
             send_intent(shared, Intent::Stop(id.to_string()));
         }
         AppAction::RestartServer(id) => {
+            app.status = Some(format!("正在重启 {id}…"));
             send_intent(shared, Intent::Restart(id.to_string()));
         }
-        AppAction::ToggleView | AppAction::Move(_) | AppAction::ScrollLog(_) | AppAction::None => {}
+        AppAction::ToggleHelp
+        | AppAction::ToggleView
+        | AppAction::Move(_)
+        | AppAction::ScrollLog(_)
+        | AppAction::None => {}
     }
 }
 
@@ -577,4 +586,30 @@ pub async fn execute_command(
         command: line.to_owned(),
         output,
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TermSize;
+
+    #[test]
+    fn 终端尺寸可以被远端改写() {
+        let size = TermSize::new((80, 24));
+        assert_eq!(size.get(), (80, 24));
+        size.set(120, 40);
+        assert_eq!(size.get(), (120, 40));
+    }
+
+    #[test]
+    fn 零尺寸被忽略_保留上一次的有效值() {
+        // 非交互环境下的 OpenSSH 会上报 0×0。直接采用会让渲染区域
+        // 变成空矩形，界面全白。
+        let size = TermSize::new((80, 24));
+        size.set(0, 0);
+        assert_eq!(size.get(), (80, 24), "0×0 不应覆盖有效尺寸");
+        size.set(100, 0);
+        assert_eq!(size.get(), (100, 24), "只有宽度的 0 应被忽略");
+        size.set(0, 30);
+        assert_eq!(size.get(), (100, 30), "只有高度的 0 应被忽略");
+    }
 }

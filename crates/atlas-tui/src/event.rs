@@ -47,7 +47,7 @@
 use atlas_core::{LogLevel, ServerId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, AppView, PAGE_SIZE};
+use crate::app::{App, AppView, PAGE_SIZE, PendingAction};
 
 /// 键盘事件触发的动作。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +70,8 @@ pub enum AppAction {
     StopServer(ServerId),
     /// 重启指定服务器。
     RestartServer(ServerId),
+    /// 打开 / 关闭快捷键备忘面板。
+    ToggleHelp,
 }
 
 /// 处理一次按键，返回触发的动作。
@@ -91,9 +93,44 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
         return AppAction::Quit;
     }
 
+    // 待确认的危险操作优先：确认期间只有 `y` / `n` / `Esc` 有意义。
+    if app.has_pending() {
+        return handle_pending_key(app, key);
+    }
+
+    // 快捷键备忘面板：`?` 随时可开，`Esc` 关闭。
+    if !ctrl && key.code == KeyCode::Char('?') {
+        app.help_open = !app.help_open;
+        return AppAction::ToggleHelp;
+    }
+    if app.help_open && key.code == KeyCode::Esc {
+        app.help_open = false;
+        return AppAction::ToggleHelp;
+    }
+
     match app.view {
         AppView::Dashboard => handle_dashboard_key(app, key, ctrl),
         AppView::ServerConsole(_) => handle_console_key(app, key, ctrl),
+    }
+}
+
+/// 确认流程中的按键：`y` 执行，`n` / `Esc` 取消，其它键忽略。
+fn handle_pending_key(app: &mut App, key: KeyEvent) -> AppAction {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let Some(pending) = app.pending.take() else {
+                return AppAction::None;
+            };
+            match pending {
+                PendingAction::Stop(id) => AppAction::StopServer(id),
+                PendingAction::Restart(id) => AppAction::RestartServer(id),
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.cancel_pending();
+            AppAction::None
+        }
+        _ => AppAction::None,
     }
 }
 
@@ -123,14 +160,23 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent, ctrl: bool) -> AppAction {
             }
         },
         KeyCode::Char('x') if !ctrl => match app.selected_server_id() {
-            Some(id) => AppAction::StopServer(id),
+            Some(id) => {
+                // 停止会踢掉在线玩家——先确认。
+                app.pending = Some(PendingAction::Stop(id));
+                app.status = None;
+                AppAction::None
+            }
             None => {
                 app.status = Some("没有可停止的服务器".to_owned());
                 AppAction::None
             }
         },
         KeyCode::Char('r') if !ctrl => match app.selected_server_id() {
-            Some(id) => AppAction::RestartServer(id),
+            Some(id) => {
+                app.pending = Some(PendingAction::Restart(id));
+                app.status = None;
+                AppAction::None
+            }
             None => {
                 app.status = Some("没有可重启的服务器".to_owned());
                 AppAction::None
@@ -246,7 +292,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::app::test_support::app_with_servers;
-    use crate::app::{App, AppView};
+    use crate::app::{App, AppView, PendingAction};
 
     use super::{AppAction, handle_key, level_style};
 
@@ -300,21 +346,116 @@ mod tests {
     }
 
     #[test]
-    fn 总览视图_sxr_触发开关服() {
+    fn 总览视图_s_直接触发启动() {
         let mut app = app_with_servers(&["a", "b"]);
         app.move_selection(1);
         assert_eq!(
             handle_key(&mut app, char_key('s')),
             AppAction::StartServer("srv1".into())
         );
+    }
+
+    #[test]
+    fn 总览视图_x_r_需要二次确认() {
+        // 停止 / 重启会踢掉在线玩家，手滑按错一次键就让人下线——
+        // 这种操作不能没有确认。
+        let mut app = app_with_servers(&["a"]);
+        assert_eq!(handle_key(&mut app, char_key('x')), AppAction::None);
         assert_eq!(
-            handle_key(&mut app, char_key('x')),
-            AppAction::StopServer("srv1".into())
+            app.pending,
+            Some(PendingAction::Stop("srv0".into())),
+            "按 x 应进入待确认状态"
         );
+        app.cancel_pending();
+
+        assert_eq!(handle_key(&mut app, char_key('r')), AppAction::None);
         assert_eq!(
-            handle_key(&mut app, char_key('r')),
-            AppAction::RestartServer("srv1".into())
+            app.pending,
+            Some(PendingAction::Restart("srv0".into())),
+            "按 r 应进入待确认状态"
         );
+    }
+
+    #[test]
+    fn 确认是模态的_待确认时只认_y_n_esc() {
+        // 模态确认更可预测：待确认时按 r 不会把"停止"悄悄换成"重启"。
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('x'));
+        let action = handle_key(&mut app, char_key('r'));
+        assert_eq!(action, AppAction::None);
+        assert_eq!(
+            app.pending,
+            Some(PendingAction::Stop("srv0".into())),
+            "待确认的动作不应被其它键改写"
+        );
+    }
+
+    #[test]
+    fn 确认后执行停止() {
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('x'));
+        let action = handle_key(&mut app, char_key('y'));
+        assert_eq!(action, AppAction::StopServer("srv0".into()));
+        assert!(!app.has_pending(), "确认后应清掉待确认状态");
+    }
+
+    #[test]
+    fn 确认后执行重启() {
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('r'));
+        let action = handle_key(&mut app, char_key('y'));
+        assert_eq!(action, AppAction::RestartServer("srv0".into()));
+        assert!(!app.has_pending());
+    }
+
+    #[test]
+    fn 按_n_取消确认() {
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('x'));
+        let action = handle_key(&mut app, char_key('n'));
+        assert_eq!(action, AppAction::None);
+        assert!(!app.has_pending(), "应已取消");
+        assert!(
+            app.status.as_deref().is_some_and(|s| s.contains("取消")),
+            "应提示已取消，实际：{:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn 按_esc_取消确认() {
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('x'));
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(!app.has_pending());
+    }
+
+    #[test]
+    fn 确认期间其它按键不会误触发操作() {
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('x'));
+        // 待确认时按 s 不该启动服务器。
+        let action = handle_key(&mut app, char_key('s'));
+        assert_eq!(action, AppAction::None);
+        assert!(app.has_pending(), "其它键应保持待确认状态");
+    }
+
+    #[test]
+    fn 问号键开关帮助面板() {
+        let mut app = app_with_servers(&["a"]);
+        assert!(!app.help_open);
+        assert_eq!(handle_key(&mut app, char_key('?')), AppAction::ToggleHelp);
+        assert!(app.help_open, "? 应打开帮助面板");
+        assert_eq!(handle_key(&mut app, char_key('?')), AppAction::ToggleHelp);
+        assert!(!app.help_open, "再按一次应关闭");
+    }
+
+    #[test]
+    fn 帮助面板打开时_esc_关闭它() {
+        let mut app = app_with_servers(&["a"]);
+        handle_key(&mut app, char_key('?'));
+        handle_key(&mut app, key(KeyCode::Esc));
+        assert!(!app.help_open);
     }
 
     #[test]
