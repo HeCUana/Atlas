@@ -37,11 +37,13 @@
 
 pub mod app;
 pub mod event;
+pub mod layout;
 pub mod remote;
 pub mod theme;
 pub mod ui;
 
 pub use app::{App, AppView, MAX_LOG_LINES, PAGE_SIZE, ServerRow};
 pub use event::{AppAction, handle_key, level_style};
+pub use layout::{Breakpoint, Region, distribute, frame};
 pub use theme::{ColorDepth, Theme};
 pub use ui::render;

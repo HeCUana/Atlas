@@ -35,6 +35,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use crate::app::{App, AppView};
+use crate::layout;
 use crate::theme::Theme;
 
 /// 输入提示符宽度（`"> "`）。
@@ -42,38 +43,335 @@ const PROMPT_WIDTH: u16 = 2;
 
 /// 渲染整个界面。
 ///
+/// 布局遵循**四区骨架**（见 [`crate::layout`]）：
+///
+/// ```text
+/// ┌ Header / 状态栏 ─────────────┐
+/// │ Sidebar │ Main Content       │
+/// │         │                    │
+/// ├ Footer / 快捷键提示 ─────────┤
+/// └──────────────────────────────┘
+/// ```
+///
+/// - **Header**：标题 + 全局状态（几台在跑）。
+/// - **Sidebar**：服务器列表（导航）。宽屏 30 列、中屏 24 列、窄屏不显示。
+/// - **Main**：主内容区——总览看选中服务器的详情与最近日志，
+///   控制台看日志输出。**优先级最高**，任何情况下都不会被挤没。
+/// - **Footer**：状态消息 + 快捷键提示。窄屏压成 1 行，只留关键内容。
+///
 /// 本函数不会 panic：任何尺寸的终端都能安全渲染（内容会被裁剪）。
 ///
 /// `app` 是可变引用：渲染时要把日志面板的**可见行数**回填给
 /// [`App`]，滚动偏移要靠它才能正确地夹住边界。
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let chunks = Layout::default()
+    let layout = layout::frame(area.width, area.height);
+    let breakpoint = layout::Breakpoint::of(area.width);
+
+    let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(layout.header),
             Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(layout.footer),
         ])
         .split(area);
 
-    render_title(frame, chunks[0], app);
-    // 帮助面板打开时，主体让位给它。
+    render_title(frame, vertical[0], app);
+
+    let body = vertical[1];
     if app.help_open {
-        render_help(frame, chunks[1], app);
+        render_help(frame, body, app);
     } else {
         // 先把视图克隆出来再借出 `app`：`render_console` 需要 `&mut App`
         // （回填日志面板的可见行数），与 `&app.view` 的不可变借用冲突。
         match app.view.clone() {
-            AppView::Dashboard => render_dashboard(frame, chunks[1], app),
-            AppView::ServerConsole(id) => render_console(frame, chunks[1], app, &id),
+            AppView::Dashboard => render_dashboard(frame, body, app, &layout, breakpoint),
+            AppView::ServerConsole(id) => render_console(frame, body, app, &id),
         }
     }
-    render_detail(frame, chunks[2], app);
-    render_status(frame, chunks[3], app);
-    render_hints(frame, chunks[4], app);
+
+    render_footer(frame, vertical[2], app, breakpoint);
+}
+
+/// 总览视图：左侧服务器列表（Sidebar）+ 右侧详情与日志（Main）。
+///
+/// 窄屏（`< 60` 列）退回单列：列表在上、详情在下，且不画装饰边框——
+/// 边框是 P3（装饰），空间紧张时先舍它。
+fn render_dashboard(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    layout: &layout::Frame,
+    breakpoint: layout::Breakpoint,
+) {
+    let borders = breakpoint.shows_borders();
+
+    if layout.sidebar == 0 {
+        // 单列：列表占上半，详情占下半。
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(detail_height(breakpoint)),
+            ])
+            .split(area);
+        render_server_list(frame, rows[0], app, borders);
+        render_selection(frame, rows[1], app, breakpoint, borders);
+        return;
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(layout.sidebar),
+            Constraint::Length(layout.gap),
+            Constraint::Length(layout.main),
+        ])
+        .split(area);
+
+    render_server_list(frame, columns[0], app, borders);
+    render_selection(frame, columns[2], app, breakpoint, borders);
+}
+
+/// 详情区在总览视图里占几行。
+///
+/// 字段按优先级排：目录（P0）→ 启动命令（P1）→ 状态（P2）。
+/// 空间不够时从末尾开始丢。
+fn detail_height(breakpoint: layout::Breakpoint) -> u16 {
+    match breakpoint.detail_capacity() {
+        0 => 0,
+        n => n as u16 + 2,
+    }
+}
+
+/// 侧边栏：服务器列表。
+///
+/// 这是**导航**区域（P2），所以放在左边、宽度固定；主内容区留给详情与日志。
+///
+/// 列表行是 `符号 + 状态 + 名称`：状态靠**符号和颜色**两重编码表达
+/// （`●` 与 `○` 形状不同，不只靠颜色），文字状态在右侧详情区里给出——
+/// 每行都写一遍"运行中"太占地方，而名称才是运维真正认的东西。
+fn render_server_list(frame: &mut Frame, area: Rect, app: &App, borders: bool) {
+    if app.servers.is_empty() {
+        let mut block = Block::default();
+        if borders {
+            block = block.borders(Borders::ALL);
+        }
+        let inner = block.inner(area);
+        frame.render_widget(block.title("服务器"), area);
+        if inner.height > 0 {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "  还没有配置任何服务器。在 atlas.toml 里加一段 [[servers]] 即可。",
+                    Style::default().fg(app.theme.muted),
+                )),
+                inner,
+            );
+        }
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .servers
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let selected = i == app.selected;
+            let (symbol, color) = state_symbol(row.state, &app.theme);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{symbol} "), Style::default().fg(color)),
+                Span::styled(pad_to(row.state.label(), 8), Style::default().fg(color)),
+                Span::styled(
+                    row.name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            // 选中项整行反显——只靠文字无法判断选中的是哪一行。
+            .style(if selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            })
+        })
+        .collect();
+
+    let mut block = Block::default();
+    if borders {
+        block = block.borders(Borders::ALL);
+    }
+    let list = List::new(items).block(block.title("服务器"));
+    frame.render_widget(list, area);
+}
+
+/// 主内容区（总览视图）：选中服务器的详情 + 最近日志。
+fn render_selection(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    breakpoint: layout::Breakpoint,
+    borders: bool,
+) {
+    let capacity = breakpoint.detail_capacity();
+    if capacity == 0 {
+        return;
+    }
+
+    // 详情字段按优先级排，容量不够时从末尾开始丢：
+    // 状态 → 目录 → ID → 启动命令。
+    let mut fields: Vec<(String, String)> = Vec::new();
+    if let Some(row) = app.selected_server() {
+        fields.push(("状态".to_owned(), row.state.label().to_owned()));
+        if let Some(cfg) = app.config.server(row.id.as_str()) {
+            fields.push(("目录".to_owned(), cfg.workdir.display().to_string()));
+            fields.push(("ID".to_owned(), row.id.to_string()));
+            let command = if cfg.args.is_empty() {
+                cfg.command.clone()
+            } else {
+                format!("{} {}", cfg.command, cfg.args.join(" "))
+            };
+            fields.push(("启动".to_owned(), command));
+        }
+    }
+    fields.truncate(capacity);
+
+    let mut detail_lines: Vec<Line> = Vec::new();
+    for (label, value) in &fields {
+        detail_lines.push(Line::from(vec![
+            Span::styled(pad_to(label, 6), Style::default().fg(app.theme.muted)),
+            Span::raw(truncate(value, area.width.saturating_sub(7))),
+        ]));
+    }
+
+    let detail_height = detail_lines.len() as u16 + if borders { 2 } else { 0 };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(detail_height), Constraint::Min(1)])
+        .split(area);
+
+    let mut block = Block::default();
+    if borders {
+        block = block.borders(Borders::ALL);
+    }
+    frame.render_widget(Paragraph::new(detail_lines).block(block), rows[0]);
+
+    // 剩下的是选中服务器的最近日志。
+    let Some(row) = app.selected_server() else {
+        return;
+    };
+    render_log_lines(frame, rows[1], app, &row.id, borders, 0);
+}
+
+/// 日志正文（控制台视图与总览的 Main 下半共用）。
+///
+/// `scroll` 是距离末尾的行数；`0` 表示贴底跟随。
+fn render_log_lines(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    id: &ServerId,
+    borders: bool,
+    scroll: usize,
+) {
+    let all: Vec<&LogEvent> = app.logs.iter().filter(|l| &l.server == id).collect();
+    let total = all.len();
+
+    // 标题行：有边框时并进边框标题，没边框时单独占 1 行。
+    let title = if scroll > 0 {
+        format!("输出 · {id}（已上滚 {scroll} 行）")
+    } else {
+        format!("输出 · {id}")
+    };
+    let title_height = if borders { 0 } else { 1 };
+    let content = Rect::new(
+        area.x,
+        area.y + title_height,
+        area.width,
+        area.height.saturating_sub(title_height),
+    );
+    if !borders {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate(&title, area.width),
+                Style::default().fg(app.theme.muted),
+            ))),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+
+    let viewport = content.height.saturating_sub(if borders { 2 } else { 0 }) as usize;
+    let end = total.saturating_sub(scroll);
+    let start = end.saturating_sub(viewport);
+
+    let mut lines: Vec<Line> = all[start..end]
+        .iter()
+        .map(|l| {
+            let color = match l.level {
+                LogLevel::Warn => app.theme.transitional,
+                LogLevel::Error | LogLevel::Fatal => app.theme.failed,
+                _ => app.theme.muted,
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", l.timestamp.as_deref().unwrap_or("--:--:--")),
+                    Style::default().fg(app.theme.muted),
+                ),
+                Span::styled(
+                    format!("{:<5} ", l.level.as_str()),
+                    Style::default().fg(color),
+                ),
+                Span::raw(l.message.clone()),
+            ])
+        })
+        .collect();
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if total == 0 {
+                "（暂无输出）"
+            } else {
+                "（已到最早，按 ↓ 继续向下）"
+            },
+            Style::default().fg(app.theme.muted),
+        )));
+    }
+
+    let mut block = Block::default();
+    if borders {
+        block = block.borders(Borders::ALL).title(title);
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        content,
+    );
+}
+
+/// 截断过长文本，超出部分用 `…` 代替。
+///
+/// 状态栏、标题、详情这类区域**不允许静默溢出**——宁可截断也不能
+/// 覆盖到别的区域上。
+fn truncate(text: &str, width: u16) -> String {
+    let width = width as usize;
+    if width == 0 {
+        return String::new();
+    }
+    if Line::from(text).width() <= width {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = Span::raw(ch.to_string()).width();
+        if used + ch_width > width.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push('…');
+    out
 }
 
 /// 快捷键备忘面板。
@@ -189,226 +487,124 @@ fn render_title(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// 总览视图：服务器列表。
-fn render_dashboard(frame: &mut Frame, area: Rect, app: &App) {
-    if app.servers.is_empty() {
-        let block = Block::default().borders(Borders::ALL).title("服务器");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height > 0 {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "  还没有配置任何服务器。在 atlas.toml 里加一段 [[servers]] 即可。",
-                    Style::default().fg(app.theme.muted),
-                )),
-                inner,
-            );
-        }
-        return;
-    }
-
-    let items: Vec<ListItem> = app
-        .servers
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let selected = i == app.selected;
-            let (symbol, color) = state_symbol(row.state, &app.theme);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{symbol} "), Style::default().fg(color)),
-                Span::styled(
-                    // 状态文字后留一列间隔：`已停止` 正好 6 列宽，
-                    // 补到 6 的话 ID 会紧贴上来。
-                    pad_to(row.state.label(), 8),
-                    Style::default().fg(color),
-                ),
-                Span::raw(pad_to(row.id.as_str(), 14)),
-                Span::styled(
-                    row.name.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-            ]))
-            // 选中项整行反显——只靠文字无法判断选中的是哪一行。
-            .style(if selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            })
-        })
-        .collect();
-
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title("服务器"));
-    frame.render_widget(list, area);
-}
-
-/// 控制台视图：指定服务器的日志输出。
+/// 控制台视图：全宽日志 + 输入行。
 ///
-/// 只显示**可见窗口**内的那一段：末尾往前 [`App::log_scroll`] 行。
-/// `log_scroll == 0` 时贴底跟随新输出。
+/// 专注看输出时不需要侧边栏——宽度全给日志。
 fn render_console(frame: &mut Frame, area: Rect, app: &mut App, id: &ServerId) {
-    let all: Vec<&LogEvent> = app.logs.iter().filter(|l| &l.server == id).collect();
-    let total = all.len();
-    // 面板高度 = 内容区高度（去掉边框）。
-    let viewport = area.height.saturating_sub(2) as usize;
-    app.log_viewport = viewport;
+    let breakpoint = layout::Breakpoint::of(area.width);
+    let borders = breakpoint.shows_borders();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(area);
 
-    let end = total.saturating_sub(app.log_scroll);
-    let start = end.saturating_sub(viewport);
-    let visible = &all[start..end];
-
-    let mut lines: Vec<Line> = visible
-        .iter()
-        .map(|l| {
-            let color = match l.level {
-                LogLevel::Warn => app.theme.transitional,
-                LogLevel::Error | LogLevel::Fatal => app.theme.failed,
-                _ => app.theme.muted,
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", l.timestamp.as_deref().unwrap_or("--:--:--")),
-                    Style::default().fg(app.theme.muted),
-                ),
-                Span::styled(
-                    format!("{:<5} ", l.level.as_str()),
-                    Style::default().fg(color),
-                ),
-                Span::raw(l.message.clone()),
-            ])
-        })
-        .collect();
-
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            if total == 0 {
-                "（暂无输出）"
-            } else {
-                "（已到最早，按 ↓ 继续向下）"
-            },
-            Style::default().fg(app.theme.muted),
-        )));
-    }
-
-    // 滚动指示：不在底部时明确告诉用户「你不在跟随状态」。
-    let title = if app.log_scroll > 0 {
-        format!("输出 · {id}（已上滚 {} 行）", app.log_scroll)
-    } else {
-        format!("输出 · {id}")
-    };
-
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    app.log_viewport = rows[0].height.saturating_sub(if borders { 2 } else { 0 }) as usize;
+    render_log_lines(frame, rows[0], app, id, borders, app.log_scroll);
+    render_input(frame, rows[1], app);
 }
 
-/// 详情行：总览显示选中服务器的信息，控制台显示输入行。
-fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
+/// 输入行（只出现在控制台视图）。
+fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let line = Line::from(vec![
+        Span::styled("> ", Style::default().fg(app.theme.accent)),
+        Span::raw(app.input.clone()),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 
-    match &app.view {
-        AppView::Dashboard => {
-            let Some(row) = app.selected_server() else {
-                return;
-            };
-            let Some(cfg) = app.config.server(row.id.as_str()) else {
-                return;
-            };
-            let command = if cfg.args.is_empty() {
-                cfg.command.clone()
-            } else {
-                format!("{} {}", cfg.command, cfg.args.join(" "))
-            };
-            let text = format!(
-                "{} · {} · {} · {}",
-                row.id,
-                if row.name.is_empty() { "-" } else { &row.name },
-                cfg.workdir.display(),
-                command
-            );
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    text,
-                    Style::default().fg(app.theme.muted),
-                ))),
-                area,
-            );
-        }
-        AppView::ServerConsole(_) => {
-            let line = Line::from(vec![
-                Span::styled("> ", Style::default().fg(app.theme.accent)),
-                Span::raw(app.input.clone()),
-            ]);
-            frame.render_widget(Paragraph::new(line), area);
-
-            // 光标定位在输入末尾（按显示宽度计算，中日韩宽字符占两列）。
-            let text_width = Span::raw(app.input.clone()).width() as u16;
-            let cursor_x = area
-                .x
-                .saturating_add(PROMPT_WIDTH)
-                .saturating_add(text_width);
-            let max_x = area.x.saturating_add(area.width.saturating_sub(1));
-            frame.set_cursor_position((cursor_x.min(max_x), area.y));
-        }
-    }
+    // 光标定位在输入末尾（按显示宽度计算，中日韩宽字符占两列）。
+    let text_width = Span::raw(app.input.clone()).width() as u16;
+    let cursor_x = area
+        .x
+        .saturating_add(PROMPT_WIDTH)
+        .saturating_add(text_width);
+    let max_x = area.x.saturating_add(area.width.saturating_sub(1));
+    frame.set_cursor_position((cursor_x.min(max_x), area.y));
 }
 
-/// 状态行：最近一次操作的结果，或待确认的危险操作提示。
-fn render_status(frame: &mut Frame, area: Rect, app: &App) {
+/// Footer：状态消息 + 快捷键提示。
+///
+/// 宽屏两行，窄屏一行——**状态优先**（错误提示是 P0），没有状态时才
+/// 显示精简后的快捷键提示。
+fn render_footer(frame: &mut Frame, area: Rect, app: &App, breakpoint: layout::Breakpoint) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (text, color) = if let Some(pending) = &app.pending {
-        (
-            format!(
-                "⚠ 确认{} {}？  [y] 确认 · [n/Esc] 取消",
-                pending.label(),
-                pending.server()
-            ),
-            app.theme.warning,
-        )
+    let status = status_text(app);
+    if area.height >= 2 {
+        let top = Rect::new(area.x, area.y, area.width, 1);
+        let bottom = Rect::new(area.x, area.y + 1, area.width, 1);
+        render_status_line(frame, top, app, status);
+        render_hints_line(frame, bottom, app, breakpoint);
+    } else if status.is_some() {
+        render_status_line(frame, area, app, status);
     } else {
-        match &app.status {
-            Some(message) => (message.clone(), app.theme.warning),
-            None => ("就绪".to_owned(), app.theme.muted),
-        }
+        render_hints_line(frame, area, app, breakpoint);
+    }
+}
+
+/// 状态消息（待确认提示优先，其次是最近一次操作的结果）。
+fn status_text(app: &App) -> Option<String> {
+    if let Some(pending) = &app.pending {
+        return Some(format!(
+            "⚠ 确认{} {}？  [y] 确认 · [n/Esc] 取消",
+            pending.label(),
+            pending.server()
+        ));
+    }
+    app.status.clone()
+}
+
+/// 状态行。
+fn render_status_line(frame: &mut Frame, area: Rect, app: &App, status: Option<String>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (text, color) = match status {
+        Some(message) => (message, app.theme.warning),
+        None => ("就绪".to_owned(), app.theme.muted),
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(text, Style::default().fg(color)))),
+        Paragraph::new(Line::from(Span::styled(
+            truncate(&text, area.width),
+            Style::default().fg(color),
+        ))),
         area,
     );
 }
 
-/// 提示行：当前视图可用的键位。
+/// 快捷键提示行。
 ///
-/// 只有**当前视图**能用的键才列出来——列一长串全局键位反而没人看得下去。
-fn render_hints(frame: &mut Frame, area: Rect, app: &App) {
+/// 只列**当前视图**能用的键——列一长串全局键位反而没人看得下去。
+/// 窄屏时进一步缩短，只留最关键的几个。
+fn render_hints_line(frame: &mut Frame, area: Rect, app: &App, breakpoint: layout::Breakpoint) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let hints = if app.help_open {
         "Esc 或 ? 关闭本面板"
     } else {
-        match &app.view {
-            AppView::Dashboard => {
+        match (&app.view, breakpoint) {
+            (AppView::Dashboard, layout::Breakpoint::Narrow) => "↑↓ 选择 · ? 快捷键",
+            (AppView::Dashboard, _) => {
                 "↑↓ 选择 · Enter 控制台 · s 启动 · x 停止 · r 重启 · ? 快捷键 · q 退出"
             }
-            AppView::ServerConsole(_) => {
+            (AppView::ServerConsole(_), layout::Breakpoint::Narrow) => "Esc 返回 · Enter 发送",
+            (AppView::ServerConsole(_), _) => {
                 "Esc 返回 · Enter 发送 · ↑↓ 滚动日志 · ? 快捷键 · Ctrl+C 退出"
             }
         }
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hints.to_owned(),
+            truncate(hints, area.width),
             Style::default().fg(app.theme.muted),
         ))),
         area,
     );
 }
-
 /// 状态对应的**符号**与颜色。
 ///
 /// 符号是颜色之外的第二编码——运维扫一眼列表就能数出几台在跑，
