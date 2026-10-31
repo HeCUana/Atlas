@@ -465,8 +465,21 @@ fn start_not_listening_hint() -> String {
     )
 }
 
+/// 停止服务的结果。
+///
+/// 与 [`StartOutcome`] 对称：停止命令返回 0 只代表"已下达停止指令"，
+/// 服务有可能被守护机制拉起来（launchd 的 `KeepAlive`、Windows 的
+/// 服务恢复选项），也可能压根不是这个服务在监听这个端口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopOutcome {
+    /// 端口是否确认已经不再监听。
+    pub stopped: bool,
+    /// 没确认停下来时的排查提示（中文）。
+    pub warning: Option<String>,
+}
+
 /// 停止服务。
-pub fn stop() -> Result<()> {
+pub fn stop() -> Result<StopOutcome> {
     match backend() {
         Backend::Windows => {
             let (ok, _) = run(
@@ -500,7 +513,39 @@ pub fn stop() -> Result<()> {
             }
         }
     }
-    Ok(())
+
+    // 停止指令发出 ≠ 端口真的关了：守护机制可能马上把它拉起来，
+    // 也可能压根是别的进程在监听 22。确认一下再报结果。
+    let stopped = wait_for_port_stopped(DEFAULT_SSH_PORT, std::time::Duration::from_secs(3));
+    let warning = if stopped {
+        None
+    } else {
+        Some(format!(
+            "已下达停止指令，但 {DEFAULT_SSH_PORT} 端口仍在监听。\n\
+             可能的原因：\n\
+             · 服务被守护机制重新拉起（launchd 的 KeepAlive / systemd 的 Restart）\n\
+             · 监听这个端口的是另一个程序\n\
+             查一下：`lsof -i :{DEFAULT_SSH_PORT}`（macOS/Linux）或 \
+             `netstat -ano | findstr :{DEFAULT_SSH_PORT}`（Windows）"
+        ))
+    };
+
+    Ok(StopOutcome { stopped, warning })
+}
+
+/// 等端口在超时前不再监听。
+fn wait_for_port_stopped(port: u16, timeout: std::time::Duration) -> bool {
+    use std::time::Instant;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !is_port_listening(port) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// 安装 SSH 服务端。
@@ -968,6 +1013,29 @@ mod tests {
         drop(listener);
 
         assert!(!wait_for_port(port, std::time::Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn 等待端口停止能认出还在监听的端口() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("应能绑定");
+        let port = listener.local_addr().expect("应有地址").port();
+
+        assert!(
+            !wait_for_port_stopped(port, std::time::Duration::from_millis(300)),
+            "还在监听的端口不该算已停止"
+        );
+    }
+
+    #[test]
+    fn 等待端口停止能认出已经关掉的端口() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("应能绑定");
+        let port = listener.local_addr().expect("应有地址").port();
+        drop(listener);
+
+        assert!(wait_for_port_stopped(
+            port,
+            std::time::Duration::from_millis(500)
+        ));
     }
 
     #[test]

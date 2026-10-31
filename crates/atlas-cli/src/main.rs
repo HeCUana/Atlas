@@ -516,8 +516,16 @@ async fn async_run(cli: Cli) -> Result<()> {
                 }
             }
             SshdAction::Stop => {
-                sshd::stop()?;
-                println!("sshd 已停止。");
+                let outcome = sshd::stop()?;
+                if let Some(warning) = &outcome.warning {
+                    println!("⚠ {warning}");
+                    println!();
+                }
+                if outcome.stopped {
+                    println!("sshd 已停止，端口不再监听。");
+                } else {
+                    println!("已下达停止指令，但端口还在监听——见上面的提示。");
+                }
             }
             SshdAction::Install => {
                 sshd::install()?;

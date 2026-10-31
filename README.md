@@ -365,7 +365,7 @@ SFTP 就绪 ✓
 | --- | --- |
 | `atlas sshd status` | 查询服务状态 + SFTP 就绪检查（服务、端口、私钥、公钥、known_hosts、**私钥污染**） |
 | `atlas sshd start` | 启动服务并设为开机自启（启动后会**确认端口是否真的在监听**，没起来会给排查提示） |
-| `atlas sshd stop` | 停止服务 |
+| `atlas sshd stop` | 停止服务（同样会**确认端口是否真的不再监听**） |
 | `atlas sshd install` | 安装 SSH 服务端（Windows 装 OpenSSH Server 可选功能；**macOS 自带，无需安装**） |
 | `atlas sshd authorize` | 把客户端公钥装进服务端的 `authorized_keys`（并收紧权限） |
 
