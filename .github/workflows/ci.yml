@@ -1,0 +1,56 @@
+name: CI
+
+# 每次推送与 PR 都检查三个平台。
+#
+# 为什么需要：release 工作流只在推 `v*` 标签时跑，而带 `#[cfg(unix)]` 的
+# 代码在 Windows 上**永远不编译**——平台专属的编译错误会一直潜伏到发版那天
+# 才暴露（v0.1.0 的首次构建就是这样翻车的）。
+# 所以这里对每个平台都跑一次 `cargo check --all-targets`，类型检查不需要链接器，
+# 比完整构建快得多。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: 检查 ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # 类型检查覆盖全部 target 与测试代码——平台专属的编译问题在这一步就能暴露。
+      - name: 类型检查
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cargo.lock 已入库；--locked 保证测的依赖与提交一致。
+      - name: 跑测试
+        run: cargo test --workspace --locked
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
