@@ -214,12 +214,18 @@ fn find_in_authorized_keys(pubkey: &str) -> Option<PathBuf> {
 /// - 公钥从**私钥**推导，不依赖可能陈旧的 `.pub` 文件；
 /// - 目标文件里若混有**私钥**，直接拒绝并报错——不往一个已经泄漏凭据的
 ///   文件里继续追加内容，那只会掩盖问题；
-/// - Windows 上顺手把 ACL 收紧到「Administrators + SYSTEM」（sshd 要求）。
+/// - 目标目录不存在时先建出来（macOS / Linux 上新账号默认没有 `~/.ssh`）；
+/// - 写完顺手把 ACL / 权限收紧到 sshd 要求的水平。
 pub fn authorize(private_key: &Path) -> Result<PathBuf> {
     let pubkey = atlas_sftp::keygen::derive_public_key(private_key)?;
     let target = authorized_keys_path();
+    write_authorized_key(&target, &pubkey)?;
+    Ok(target)
+}
 
-    if let Ok(existing) = std::fs::read_to_string(&target)
+/// 把一行公钥写进 `target`，目录不存在时先建出来。
+fn write_authorized_key(target: &Path, pubkey: &str) -> Result<()> {
+    if let Ok(existing) = std::fs::read_to_string(target)
         && atlas_sftp::keygen::contains_private_key(&existing)
     {
         return Err(atlas_core::AtlasError::Other(format!(
@@ -230,19 +236,48 @@ pub fn authorize(private_key: &Path) -> Result<PathBuf> {
         )));
     }
 
-    let mut content = std::fs::read_to_string(&target).unwrap_or_default();
+    // 目标目录可能还不存在——macOS / Linux 上新账号默认**没有** `~/.ssh`，
+    // 不先建出来的话写入会抛一个看不出所以然的英文系统错误。
+    ensure_parent_dir(target)?;
+
+    let mut content = std::fs::read_to_string(target).unwrap_or_default();
     let already = content.lines().any(|line| line.trim() == pubkey.trim());
     if !already {
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
         }
-        content.push_str(&pubkey);
+        content.push_str(pubkey);
         content.push('\n');
-        std::fs::write(&target, &content)?;
+        std::fs::write(target, &content).map_err(|e| {
+            atlas_core::AtlasError::Other(format!("写入 {} 失败：{e}", target.display()))
+        })?;
     }
 
-    harden_authorized_keys_permissions(&target);
-    Ok(target)
+    harden_authorized_keys_permissions(target);
+    Ok(())
+}
+
+/// 确保 `authorized_keys` 所在目录存在。
+///
+/// macOS / Linux 上新账号默认**没有** `~/.ssh`，不先建出来的话写入会抛出
+/// 一个看不出所以然的系统错误（`No such file or directory`）。
+///
+/// 目录权限不在这里定——`harden_authorized_keys_permissions` 写完会把父目录
+/// 收紧到 `0700`，那才是 sshd 的 StrictModes 真正要求的。
+fn ensure_parent_dir(target: &Path) -> Result<()> {
+    let Some(dir) = target.parent() else {
+        return Ok(());
+    };
+    if dir.as_os_str().is_empty() || dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| {
+        atlas_core::AtlasError::Other(format!(
+            "创建目录 {} 失败：{e}\n提示：手动执行 `mkdir -p {}` 后重试。",
+            dir.display(),
+            dir.display()
+        ))
+    })
 }
 
 /// 收紧 `authorized_keys` 的 ACL（Windows）。
@@ -777,5 +812,71 @@ mod tests {
         let (running, startup) = macos_decide(p);
         assert!(running);
         assert_eq!(startup.as_deref(), Some("on"));
+    }
+
+    /// 一条合法的公钥（占位内容，格式对就行）。
+    const PUBKEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample atlas-test";
+
+    #[test]
+    fn 授权写入会自动创建缺失的目录() {
+        // macOS / Linux 新账号默认没有 ~/.ssh——不先建出来就是一堆看不懂的英文错误。
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let target = tmp.path().join(".ssh").join("authorized_keys");
+        assert!(!target.parent().expect("应有父目录").exists());
+
+        write_authorized_key(&target, PUBKEY).expect("写入不应失败");
+
+        assert!(target.is_file(), "应能创建 authorized_keys");
+        let content = std::fs::read_to_string(&target).expect("应能读回");
+        assert!(content.contains(PUBKEY));
+    }
+
+    #[test]
+    fn 授权写入不会丢掉已有公钥() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let target = tmp.path().join(".ssh").join("authorized_keys");
+        let other = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther other-test";
+        std::fs::create_dir_all(target.parent().expect("应有父目录")).expect("应能创建目录");
+        std::fs::write(&target, format!("{other}\n")).expect("应能写入");
+
+        write_authorized_key(&target, PUBKEY).expect("写入不应失败");
+
+        let content = std::fs::read_to_string(&target).expect("应能读回");
+        assert!(content.contains(other), "已有公钥不能丢");
+        assert!(content.contains(PUBKEY));
+    }
+
+    #[test]
+    fn 授权写入对同一把钥匙是幂等的() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let target = tmp.path().join(".ssh").join("authorized_keys");
+
+        write_authorized_key(&target, PUBKEY).expect("首次写入不应失败");
+        write_authorized_key(&target, PUBKEY).expect("二次写入不应失败");
+
+        let content = std::fs::read_to_string(&target).expect("应能读回");
+        assert_eq!(
+            content.lines().filter(|l| l.trim() == PUBKEY).count(),
+            1,
+            "同一把公钥不该写两遍"
+        );
+    }
+
+    #[test]
+    fn 授权写入在文件混有私钥时拒绝动手() {
+        let tmp = tempfile::tempdir().expect("应能创建临时目录");
+        let target = tmp.path().join(".ssh").join("authorized_keys");
+        std::fs::create_dir_all(target.parent().expect("应有父目录")).expect("应能创建目录");
+        let leaked = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
+        std::fs::write(&target, leaked).expect("应能写入");
+
+        let err = write_authorized_key(&target, PUBKEY).unwrap_err();
+        assert!(
+            err.to_string().contains("混有私钥"),
+            "错误信息应点明私钥混入，实际：{err}"
+        );
+
+        let content = std::fs::read_to_string(&target).expect("应能读回");
+        assert_eq!(content, leaked, "拒绝时不能改动文件");
     }
 }
