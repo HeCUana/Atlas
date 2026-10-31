@@ -10,6 +10,29 @@
 | 核心定位 | 多服务器的开服 / 关服 / 重启、日志解析、文件与命令管理、插件扩展 |
 | 当前重点 | **日志识别与解析**，并将解析结果转换为供插件调用的接口 |
 
+### 下载
+
+预编译二进制在 [Releases](https://github.com/HeCUana/Atlas/releases) 页：
+
+| 平台 | 产物 |
+| --- | --- |
+| Linux x86_64 | `atlas-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `atlas-x86_64-pc-windows-msvc.zip` |
+| macOS Apple Silicon | `atlas-aarch64-apple-darwin.tar.gz` |
+
+每个包内含 `atlas` 可执行文件、README、LICENSE 与 `atlas.toml.example` 配置模板。
+解压后先 `atlas init` 生成配置，再 `atlas start` 开服。
+
+源码构建需要 Rust 1.88 以上（edition 2024）：
+
+```bash
+git clone https://github.com/HeCUana/Atlas.git
+cd Atlas
+cargo build --release        # 产物在 target/release/atlas
+```
+
+> **Windows 构建提示**：`russh` 的默认加密后端 `aws-lc-rs` 在 Windows x86_64 上默认需要本机安装 NASM 汇编器。仓库内的 [`.cargo/config.toml`](.cargo/config.toml) 已设置 `AWS_LC_SYS_PREBUILT_NASM=1`，改用 `aws-lc-sys` 自带的预编译目标文件，**无需安装任何外部工具**。
+
 ### 文档索引
 
 | 文档 | 定位 | 主要读者 |
