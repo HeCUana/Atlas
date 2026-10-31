@@ -350,8 +350,33 @@ SFTP 就绪 ✓
 | `atlas sshd status` | 查询服务状态 + SFTP 就绪检查（服务、端口、私钥、公钥、known_hosts、**私钥污染**） |
 | `atlas sshd start` | 启动服务并设为开机自启 |
 | `atlas sshd stop` | 停止服务 |
-| `atlas sshd install` | 安装 SSH 服务端（Windows 装 OpenSSH Server 可选功能） |
-| `atlas sshd authorize` | 把客户端公钥装进服务端的 `authorized_keys`（并收紧 ACL） |
+| `atlas sshd install` | 安装 SSH 服务端（Windows 装 OpenSSH Server 可选功能；**macOS 自带，无需安装**） |
+| `atlas sshd authorize` | 把客户端公钥装进服务端的 `authorized_keys`（并收紧权限） |
+
+#### 各平台的系统 SSH 服务
+
+三个平台的"系统 SSH 服务"管理方式完全不同，Atlas 按平台分别对接：
+
+| 平台 | 管理方式 | 服务标识 | `atlas sshd install` |
+| --- | --- | --- | --- |
+| Windows | 服务管理器（PowerShell） | `sshd` | 装 OpenSSH Server 可选功能 |
+| **macOS** | **launchd** | 标签 `com.openssh.sshd`，plist `/System/Library/LaunchDaemons/ssh.plist` | **自带 OpenSSH，无需安装** |
+| Linux | systemd | `sshd.service` / `ssh.service` | 用系统包管理器装 |
+
+macOS 上的启停需要管理员权限，而 Atlas 无法在非交互环境里索取口令，所以
+`atlas sshd start` 会**失败并给出可照抄的命令**：
+
+```console
+$ atlas sshd start
+Error: 启动 sshd 失败：需要**管理员权限**。请手动执行：
+  sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
+（这等同于系统设置 → 通用 → 共享 → 打开「远程登录」）
+```
+
+> **权限收紧在 Unix 上同样生效**：`atlas sshd authorize` 会把 `authorized_keys`
+> 设为 `0600`、把 `~/.ssh` 设为 `0700`。这不是洁癖——sshd 的 **StrictModes**
+> 在权限过宽时会**静默忽略**这个文件，表现就是"公钥明明装上了却还是登不进去"，
+> 极难排查。`atlas keygen` 生成私钥时也会收紧所在目录的权限。
 
 > **`authorize` 用的是哪把私钥**：`keys/id_ed25519`（`atlas keygen` 的默认输出）。它是给**第三方客户端**用的凭据——第三方客户端拿这把私钥连本机。它与 `atlas serve` 的主机私钥（`keys/host_ed25519`）是**两把不同的钥匙**，不要混用。
 >

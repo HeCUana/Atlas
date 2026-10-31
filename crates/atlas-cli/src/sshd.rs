@@ -26,6 +26,50 @@ use atlas_core::Result;
 /// sshd 的默认端口。
 pub const DEFAULT_SSH_PORT: u16 = 22;
 
+/// macOS 上 OpenSSH 服务的 launchd **标签**。
+///
+/// 与 plist 的文件名不是一回事：plist 叫 `ssh.plist`，标签叫 `com.openssh.sshd`。
+const MACOS_SSHD_LABEL: &str = "com.openssh.sshd";
+
+/// macOS 上 OpenSSH 服务的 launchd **plist 路径**。
+const MACOS_SSHD_PLIST: &str = "/System/Library/LaunchDaemons/ssh.plist";
+
+/// macOS 自带 OpenSSH 服务端，二进制在 `/usr/libexec/` 下。
+const MACOS_SSHD_BINARY: &str = "/usr/libexec/sshd-keygen-wrapper";
+
+/// 本机的 SSH 服务管理后端。
+///
+/// 三个平台的"系统 SSH 服务"完全不是一回事：
+///
+/// | 平台 | 管理方式 | 服务名 |
+/// | --- | --- | --- |
+/// | Windows | 服务管理器（PowerShell） | `sshd` |
+/// | macOS | launchd | 标签 `com.openssh.sshd`，plist `ssh.plist` |
+/// | Linux | systemd | `sshd.service` / `ssh.service` |
+///
+/// macOS **自带** OpenSSH，用 launchd 管理（系统设置里的「远程登录」开关），
+/// **没有** systemd——所以 macOS 上不能拿 `systemctl` 去问。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    /// Windows 服务。
+    Windows,
+    /// macOS 的 launchd。
+    MacOs,
+    /// Linux 的 systemd。
+    Systemd,
+}
+
+/// 当前平台的服务管理后端。
+fn backend() -> Backend {
+    if cfg!(windows) {
+        Backend::Windows
+    } else if cfg!(target_os = "macos") {
+        Backend::MacOs
+    } else {
+        Backend::Systemd
+    }
+}
+
 /// sshd 动作由 CLI 层的 `SshdAction` 表示；本模块只提供实现。
 ///
 /// sshd 的运行状态。
@@ -195,11 +239,44 @@ pub fn authorize(private_key: &Path) -> Result<PathBuf> {
         std::fs::write(&target, &content)?;
     }
 
-    harden_authorized_keys_acl(&target);
+    harden_authorized_keys_permissions(&target);
     Ok(target)
 }
 
 /// 收紧 `authorized_keys` 的 ACL（Windows）。
+/// 收紧 `authorized_keys` 的权限，让 sshd 真的愿意读它。
+///
+/// sshd 的 **StrictModes**（默认开）会检查权限：
+/// - `authorized_keys` 不能被同机其它用户读写（必须 `0600`）；
+/// - `~/.ssh` 目录也不能被同机其它用户写入（必须 `0700`）。
+///
+/// 权限过宽的话 sshd **不会报错，只会静默忽略**这个文件——表现就是
+/// "公钥明明装上了却还是登不进去"，极难排查。
+///
+/// Windows 上没有 POSIX 权限位，改用 `icacls` 收紧 ACL。
+pub fn harden_authorized_keys_permissions(path: &Path) {
+    #[cfg(windows)]
+    {
+        harden_authorized_keys_acl(path);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("收紧 {} 的权限失败: {e}", path.display());
+        }
+        // 父目录（通常是 ~/.ssh）也要收紧，否则 sshd 仍会拒绝。
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+            && let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        {
+            tracing::warn!("收紧目录 {} 的权限失败: {e}", dir.display());
+        }
+    }
+}
+
 #[cfg(windows)]
 fn harden_authorized_keys_acl(path: &Path) {
     for args in [
@@ -220,60 +297,92 @@ fn harden_authorized_keys_acl(_path: &Path) {}
 
 /// 启动服务并设为开机自启。
 pub fn start() -> Result<()> {
-    if cfg!(windows) {
-        // 先确保服务存在。
-        if !service_installed() {
-            return Err(atlas_core::AtlasError::Other(
-                "sshd 服务尚未安装，请先运行 `atlas sshd install`".into(),
-            ));
+    match backend() {
+        Backend::Windows => {
+            // 先确保服务存在。
+            if !service_installed() {
+                return Err(atlas_core::AtlasError::Other(
+                    "sshd 服务尚未安装，请先运行 `atlas sshd install`".into(),
+                ));
+            }
+            let (ok, _) = run(
+                "powershell",
+                &["-NoProfile", "-Command", "Start-Service sshd"],
+            );
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(
+                    "启动 sshd 失败：需要**管理员权限**的终端，或该服务被其它程序锁定".into(),
+                ));
+            }
+            let _ = run(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "Set-Service sshd -StartupType Automatic",
+                ],
+            );
         }
-        let (ok, _) = run(
-            "powershell",
-            &["-NoProfile", "-Command", "Start-Service sshd"],
-        );
-        if !ok {
-            return Err(atlas_core::AtlasError::Other(
-                "启动 sshd 失败：需要**管理员权限**的终端，或该服务被其它程序锁定".into(),
-            ));
+        Backend::MacOs => {
+            // macOS 自带 OpenSSH，服务由 launchd 管理。
+            // `sudo -n` 不弹密码——非交互环境里没法定向用户要口令，
+            // 失败就直接把可照抄的命令给出去。
+            let (ok, _) = run("sudo", &["-n", "launchctl", "load", "-w", MACOS_SSHD_PLIST]);
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(format!(
+                    "启动 sshd 失败：需要**管理员权限**。请手动执行：\n\
+                     \x20 sudo launchctl load -w {MACOS_SSHD_PLIST}\n\
+                     （这等同于系统设置 → 通用 → 共享 → 打开「远程登录」）"
+                )));
+            }
         }
-        let _ = run(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "Set-Service sshd -StartupType Automatic",
-            ],
-        );
-    } else {
-        let (ok, _) = run("systemctl", &["start", "sshd"]);
-        if !ok {
-            return Err(atlas_core::AtlasError::Other(
-                "启动 sshd 失败：可能需要 root 权限，或服务名不是 sshd（部分发行版是 ssh）".into(),
-            ));
+        Backend::Systemd => {
+            let (ok, _) = run("systemctl", &["start", "sshd"]);
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(
+                    "启动 sshd 失败：可能需要 root 权限，或服务名不是 sshd（部分发行版是 ssh）"
+                        .into(),
+                ));
+            }
+            let _ = run("systemctl", &["enable", "sshd"]);
         }
-        let _ = run("systemctl", &["enable", "sshd"]);
     }
     Ok(())
 }
 
 /// 停止服务。
 pub fn stop() -> Result<()> {
-    if cfg!(windows) {
-        let (ok, _) = run(
-            "powershell",
-            &["-NoProfile", "-Command", "Stop-Service sshd"],
-        );
-        if !ok {
-            return Err(atlas_core::AtlasError::Other(
-                "停止 sshd 失败：需要**管理员权限**的终端".into(),
-            ));
+    match backend() {
+        Backend::Windows => {
+            let (ok, _) = run(
+                "powershell",
+                &["-NoProfile", "-Command", "Stop-Service sshd"],
+            );
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(
+                    "停止 sshd 失败：需要**管理员权限**的终端".into(),
+                ));
+            }
         }
-    } else {
-        let (ok, _) = run("systemctl", &["stop", "sshd"]);
-        if !ok {
-            return Err(atlas_core::AtlasError::Other(
-                "停止 sshd 失败：可能需要 root 权限".into(),
-            ));
+        Backend::MacOs => {
+            let (ok, _) = run(
+                "sudo",
+                &["-n", "launchctl", "unload", "-w", MACOS_SSHD_PLIST],
+            );
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(format!(
+                    "停止 sshd 失败：需要**管理员权限**。请手动执行：\n\
+                     \x20 sudo launchctl unload -w {MACOS_SSHD_PLIST}"
+                )));
+            }
+        }
+        Backend::Systemd => {
+            let (ok, _) = run("systemctl", &["stop", "sshd"]);
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(
+                    "停止 sshd 失败：可能需要 root 权限".into(),
+                ));
+            }
         }
     }
     Ok(())
@@ -281,93 +390,153 @@ pub fn stop() -> Result<()> {
 
 /// 安装 SSH 服务端。
 pub fn install() -> Result<()> {
-    if cfg!(windows) {
-        let (ok, _) = run(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null",
-            ],
-        );
-        if !ok {
+    match backend() {
+        Backend::Windows => {
+            let (ok, _) = run(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null",
+                ],
+            );
+            if !ok {
+                return Err(atlas_core::AtlasError::Other(
+                    "安装 OpenSSH Server 失败：需要**管理员权限**的终端，且要能连上 Windows Update"
+                        .into(),
+                ));
+            }
+        }
+        Backend::MacOs => {
+            // macOS **自带** OpenSSH（服务端二进制在 /usr/libexec/），
+            // 不需要装任何东西——只要把服务拉起来。
+            println!("macOS 自带 OpenSSH 服务端，无需安装。");
+            println!("直接运行 `atlas sshd start` 即可（等同于打开「远程登录」）。");
+        }
+        Backend::Systemd => {
             return Err(atlas_core::AtlasError::Other(
-                "安装 OpenSSH Server 失败：需要**管理员权限**的终端，且要能连上 Windows Update"
+                "当前平台请用系统包管理器安装 OpenSSH 服务端，例如：\n\
+                 \x20 Debian/Ubuntu: apt install openssh-server\n\
+                 \x20 RHEL/Fedora:   dnf install openssh-server\n\
+                 \x20 Arch:          pacman -S openssh"
                     .into(),
             ));
         }
-    } else {
-        return Err(atlas_core::AtlasError::Other(
-            "当前平台请用系统包管理器安装 OpenSSH 服务端，例如：\n\
-             \x20 Debian/Ubuntu: apt install openssh-server\n\
-             \x20 RHEL/Fedora:   dnf install openssh-server\n\
-             \x20 Arch:          pacman -S openssh"
-                .into(),
-        ));
     }
     Ok(())
 }
 
 /// 服务是否已安装。
 fn service_installed() -> bool {
-    if cfg!(windows) {
-        let (ok, _) = run(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "if (Get-Service sshd -ErrorAction SilentlyContinue) { 'yes' }",
-            ],
-        );
-        ok && !run(
-            "powershell",
-            &["-NoProfile", "-Command", "(Get-Service sshd).Name"],
-        )
-        .1
-        .is_empty()
-    } else {
-        run("systemctl", &["list-unit-files", "sshd.service"]).0
-            || run("systemctl", &["list-unit-files", "ssh.service"]).0
+    match backend() {
+        Backend::Windows => {
+            let (ok, _) = run(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "if (Get-Service sshd -ErrorAction SilentlyContinue) { 'yes' }",
+                ],
+            );
+            ok && !run(
+                "powershell",
+                &["-NoProfile", "-Command", "(Get-Service sshd).Name"],
+            )
+            .1
+            .is_empty()
+        }
+        Backend::MacOs => {
+            // macOS 自带 OpenSSH，服务端二进制与 plist 都在系统目录里。
+            std::path::Path::new(MACOS_SSHD_PLIST).exists()
+                || std::path::Path::new(MACOS_SSHD_BINARY).exists()
+        }
+        Backend::Systemd => {
+            run("systemctl", &["list-unit-files", "sshd.service"]).0
+                || run("systemctl", &["list-unit-files", "ssh.service"]).0
+        }
     }
 }
 
 /// 查询 `(已安装, 运行中, 启动类型)`。
 fn service_state() -> (bool, bool, Option<String>) {
-    if cfg!(windows) {
-        let (ok, text) = run(
-            "powershell",
-            &[
-                "-NoProfile",
-                "-Command",
-                "$s = Get-Service sshd -ErrorAction SilentlyContinue; if ($s) { \"$($s.Status)|$($s.StartType)\" }",
-            ],
-        );
-        if !ok || text.is_empty() {
-            return (false, false, None);
+    match backend() {
+        Backend::Windows => {
+            let (ok, text) = run(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    "$s = Get-Service sshd -ErrorAction SilentlyContinue; if ($s) { \"$($s.Status)|$($s.StartType)\" }",
+                ],
+            );
+            if !ok || text.is_empty() {
+                return (false, false, None);
+            }
+            let mut parts = text.split('|');
+            let status = parts.next().unwrap_or_default().trim();
+            let start_type = parts.next().unwrap_or_default().trim();
+            (
+                true,
+                status.eq_ignore_ascii_case("Running"),
+                Some(start_type.to_owned()),
+            )
         }
-        let mut parts = text.split('|');
-        let status = parts.next().unwrap_or_default().trim();
-        let start_type = parts.next().unwrap_or_default().trim();
-        (
-            true,
-            status.eq_ignore_ascii_case("Running"),
-            Some(start_type.to_owned()),
-        )
-    } else {
-        let (ok, state) = run("systemctl", &["is-active", "sshd"]);
-        let running = ok && state.trim() == "active";
-        let (_, enabled) = run("systemctl", &["is-enabled", "sshd"]);
-        let startup = enabled.trim().to_owned();
-        (
-            service_installed(),
-            running,
-            if startup.is_empty() {
-                None
-            } else {
-                Some(startup)
-            },
-        )
+        Backend::MacOs => {
+            let (installed, running, startup) = macos_service_state();
+            (installed, running, startup)
+        }
+        Backend::Systemd => {
+            let (ok, state) = run("systemctl", &["is-active", "sshd"]);
+            let running = ok && state.trim() == "active";
+            let (_, enabled) = run("systemctl", &["is-enabled", "sshd"]);
+            let startup = enabled.trim().to_owned();
+            (
+                service_installed(),
+                running,
+                if startup.is_empty() {
+                    None
+                } else {
+                    Some(startup)
+                },
+            )
+        }
     }
+}
+
+/// macOS 上 OpenSSH 服务的 `(运行中, 开机自启)`。
+///
+/// launchd 的服务状态不在 systemd 那边：`launchctl print system/<标签>` 能读到
+/// 服务的 `state = running`；是否开机自启则看 `launchctl print-disabled system`
+/// 里该标签有没有被标成 `true`（被禁用）。
+fn macos_service_state() -> (bool, bool, Option<String>) {
+    let installed = service_installed();
+
+    // `launchctl print` 在服务未加载时返回非零；部分版本需要 sudo，
+    // 所以读不到时退回到 `launchctl list <标签>`（能列出即已加载）。
+    let (print_ok, text) = run(
+        "launchctl",
+        &["print", &format!("system/{MACOS_SSHD_LABEL}")],
+    );
+    let mut running = print_ok && text.lines().any(|l| l.trim() == "state = running");
+    if !print_ok {
+        running = run("launchctl", &["list", MACOS_SSHD_LABEL]).0;
+    }
+
+    // 开机自启：被「远程登录」关掉时，launchd 会把该服务标成 disabled。
+    let (_, disabled) = run("launchctl", &["print-disabled", "system"]);
+    let is_disabled = disabled
+        .lines()
+        .any(|line| line.contains(MACOS_SSHD_LABEL) && line.contains("=> true"));
+
+    let startup = if is_disabled {
+        Some("disabled".to_owned())
+    } else if running {
+        Some("on".to_owned())
+    } else {
+        None
+    };
+
+    (installed, running, startup)
 }
 
 /// 端口上是否有进程在监听。

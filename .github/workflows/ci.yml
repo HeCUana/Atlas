@@ -37,6 +37,20 @@ jobs:
       - name: 类型检查
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
+      # 真跑一次二进制。只编译不运行的话，平台差异（比如 macOS 上
+      # `atlas sshd status` 走 launchd 而非 systemctl）根本不会被发现。
+      - name: 构建并冒烟
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p atlas-cli
+          BINARY="target/${{ matrix.target }}/release/atlas"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            BINARY="target/${{ matrix.target }}/release/atlas.exe"
+          fi
+          "$BINARY" --version
+          "$BINARY" --help > /dev/null
+          # 各平台的系统 SSH 服务查询——这是平台差异最集中的地方。
+          "$BINARY" sshd status || true
+
   test:
     name: 单元测试
     runs-on: ubuntu-latest

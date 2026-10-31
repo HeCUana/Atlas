@@ -163,6 +163,28 @@ atlas-cli  →  atlas-core
 - `atlas-sftp` 可以依赖 `atlas-core`（配置类型、错误类型统一由 core 提供），
   但**不得依赖其他内部 crate**（见 §2.1）。
 
+### 4.8 平台差异（本机 SSH 服务）
+
+- 三个平台的"系统 SSH 服务"**完全不是一回事**，不要拿一套命令套三个平台：
+
+  | 平台 | 管理方式 | 服务标识 |
+  | --- | --- | --- |
+  | Windows | 服务管理器（PowerShell） | `sshd` |
+  | macOS | **launchd** | 标签 `com.openssh.sshd`，plist `/System/Library/LaunchDaemons/ssh.plist` |
+  | Linux | systemd | `sshd.service` / `ssh.service` |
+
+- macOS **自带** OpenSSH（服务端二进制在 `/usr/libexec/`），**没有** systemd——
+  在 macOS 上用 `systemctl` 问服务状态必然查不到。
+- macOS 的启停需要管理员权限，而 Atlas 在非交互环境里**没法索取口令**：
+  用 `sudo -n`（不弹密码），失败就把**可照抄的命令**给用户，而不是干巴巴地说"权限不足"。
+- **Unix 上必须收紧权限**：`authorized_keys` 要 `0600`、`~/.ssh` 要 `0700`。
+  sshd 的 **StrictModes** 在权限过宽时会**静默忽略**文件——表现是"公钥明明装上了
+  却还是登不进去"，极难排查。写私钥时同理（目录 `0700`、私钥 `0600`）。
+- **平台专属代码路径要真的编译过**。`#[cfg(unix)]` / `#[cfg(windows)]` 里的代码
+  在本机永远不会编译，本机 `cargo build` / `cargo test` 全绿也不代表它能编。
+  CI 必须对三个平台都跑 `cargo check --all-targets`，并且**真的把二进制跑起来**
+  （`--version` / `--help` / `sshd status`）——只编译不运行，平台差异根本发现不了。
+
 ### 4.8 远程 TUI（Atlas 作为服务端）
 
 - 远程 TUI 的传输层是 **SSH**（`russh` 服务端 + 通道承载 `ratatui` 界面），

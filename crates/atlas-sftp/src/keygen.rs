@@ -406,6 +406,14 @@ fn write_private_key(path: &Path, content: &[u8]) -> Result<()> {
         file.sync_all()?;
         // `mode` 只在创建时生效；文件已存在时需要再显式收紧一次。
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+
+        // 父目录也要收紧。ssh 要求 `~/.ssh` 不可被同机其它用户写入，
+        // 权限过宽时它会**静默拒绝**使用这把私钥（"UNPROTECTED PRIVATE KEY FILE"）。
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
 
     #[cfg(not(unix))]
