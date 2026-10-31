@@ -501,8 +501,19 @@ async fn async_run(cli: Cli) -> Result<()> {
                 }
             }
             SshdAction::Start => {
-                sshd::start()?;
-                println!("sshd 已启动（并设为开机自启）。");
+                let outcome = sshd::start()?;
+                if let Some(warning) = &outcome.warning {
+                    println!("⚠ {warning}");
+                    println!();
+                }
+                if outcome.listening {
+                    println!(
+                        "sshd 已启动（并设为开机自启），{} 端口已在监听。",
+                        sshd::DEFAULT_SSH_PORT
+                    );
+                } else {
+                    println!("sshd 已加载（并设为开机自启），但端口还没起来——见上面的提示。");
+                }
             }
             SshdAction::Stop => {
                 sshd::stop()?;

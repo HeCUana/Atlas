@@ -364,7 +364,7 @@ SFTP 就绪 ✓
 | 子命令 | 说明 |
 | --- | --- |
 | `atlas sshd status` | 查询服务状态 + SFTP 就绪检查（服务、端口、私钥、公钥、known_hosts、**私钥污染**） |
-| `atlas sshd start` | 启动服务并设为开机自启 |
+| `atlas sshd start` | 启动服务并设为开机自启（启动后会**确认端口是否真的在监听**，没起来会给排查提示） |
 | `atlas sshd stop` | 停止服务 |
 | `atlas sshd install` | 安装 SSH 服务端（Windows 装 OpenSSH Server 可选功能；**macOS 自带，无需安装**） |
 | `atlas sshd authorize` | 把客户端公钥装进服务端的 `authorized_keys`（并收紧权限） |
@@ -388,6 +388,12 @@ Error: 启动 sshd 失败：需要**管理员权限**。请手动执行：
   sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
 （这等同于系统设置 → 通用 → 共享 → 打开「远程登录」）
 ```
+
+> **启动成功 ≠ 已经在收连接**。三个平台的启动命令返回 0 都只代表"服务已加载"，
+> 监听套接字可能还没绑上（macOS 的 launchd 尤其明显）。所以 `atlas sshd start`
+> 之后 Atlas 会**实际探测一次 22 端口**：起来了就报"端口已在监听"，
+> 没起来就按平台给出**能照着做的排查命令**（macOS 会提示去看
+> `launchctl print system/com.openssh.sshd` 和 `lsof -i :22`）。
 
 > **权限收紧在 Unix 上同样生效**：`atlas sshd authorize` 会把 `authorized_keys`
 > 设为 `0600`、把 `~/.ssh` 设为 `0700`。这不是洁癖——sshd 的 **StrictModes**

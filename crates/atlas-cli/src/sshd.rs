@@ -346,8 +346,21 @@ fn harden_authorized_keys_acl(path: &Path) {
     }
 }
 
+/// 启动服务的结果。
+///
+/// 启动命令返回 0 **不等于**服务已经在收连接——三个平台都有这种情况：
+/// 服务加载成功但监听套接字还没绑上（macOS 的 launchd 尤其明显）。
+/// 所以启动后要确认端口，并把这个事实如实报给运维。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartOutcome {
+    /// 服务是否确认在监听 SSH 端口。
+    pub listening: bool,
+    /// 没确认监听到时的排查提示（中文，带能照着做的建议）。
+    pub warning: Option<String>,
+}
+
 /// 启动服务并设为开机自启。
-pub fn start() -> Result<()> {
+pub fn start() -> Result<StartOutcome> {
     match backend() {
         Backend::Windows => {
             // 先确保服务存在。
@@ -398,7 +411,58 @@ pub fn start() -> Result<()> {
             let _ = run("systemctl", &["enable", "sshd"]);
         }
     }
-    Ok(())
+
+    // 启动命令成功 ≠ 服务已经在收连接。等一下再确认端口，
+    // 别让"已启动"变成一句没验证过的空话。
+    let listening = wait_for_port(DEFAULT_SSH_PORT, std::time::Duration::from_secs(3));
+    let warning = if listening {
+        None
+    } else {
+        Some(start_not_listening_hint())
+    };
+
+    Ok(StartOutcome { listening, warning })
+}
+
+/// 等端口在超时前开始监听。
+fn wait_for_port(port: u16, timeout: std::time::Duration) -> bool {
+    use std::time::Instant;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if is_port_listening(port) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// 启动成功但端口没起来时的排查提示。
+///
+/// 按平台给不同的建议——三者的排查入口根本不是一回事。
+fn start_not_listening_hint() -> String {
+    let platform_hint = match backend() {
+        Backend::Windows => {
+            "· 确认服务状态：`Get-Service sshd`\n\
+             · 确认监听地址：`netstat -ano | findstr :22`"
+        }
+        Backend::MacOs => {
+            "· 确认「远程登录」真的打开：系统设置 → 通用 → 共享 → 远程登录\n\
+             · 确认 launchd 里服务在：`launchctl print system/com.openssh.sshd`\n\
+             · 确认端口确实被绑定：`lsof -i :22`（监听者通常是 launchd，不是 sshd）"
+        }
+        Backend::Systemd => {
+            "· 确认服务状态：`systemctl status sshd`\n\
+             · 确认监听地址：`ss -lntp | grep :22`"
+        }
+    };
+    format!(
+        "服务已加载并设为开机自启，但 {DEFAULT_SSH_PORT} 端口没有开始监听。\n\
+         照着下面几条查一遍：\n{platform_hint}\n\
+         （Windows / macOS 的防火墙也可能拦掉外部连接，但那不影响本机回环探测）"
+    )
 }
 
 /// 停止服务。
@@ -640,6 +704,13 @@ fn macos_service_state(port_listening: bool) -> (bool, bool, Option<String>) {
 }
 
 /// 端口上是否有进程在监听。
+///
+/// 只做 TCP 连接握手，不发任何数据——足够判断「有没有人在收连接」。
+///
+/// macOS 上有个副作用要知道：launchd 持有 22 端口的监听套接字，
+/// 探针连上去会让它**拉起一个短命的 `sshd` 子进程**（连上就断，
+/// 子进程随即退出）。系统日志里会多一条 preauth 连接记录——正常现象，
+/// 跟被扫描到是同一种记录，不是有人在攻击。
 fn is_port_listening(port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream};
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -878,6 +949,25 @@ mod tests {
             st.summary_line(),
             "installed=0 running=0 port_listening=0 startup=unknown"
         );
+    }
+
+    #[test]
+    fn 等待端口能认出现在监听的端口() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("应能绑定");
+        let port = listener.local_addr().expect("应有地址").port();
+        // listener 一直活着，端口就一直在监听。
+
+        assert!(wait_for_port(port, std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn 等待端口在超时前会放弃() {
+        // 先占一个端口再放掉——放掉之后连上去会被拒绝。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("应能绑定");
+        let port = listener.local_addr().expect("应有地址").port();
+        drop(listener);
+
+        assert!(!wait_for_port(port, std::time::Duration::from_millis(300)));
     }
 
     #[test]
