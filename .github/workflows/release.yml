@@ -80,6 +80,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 必须 checkout：`gh release create` 要在 git 仓库里工作，
+      # `--generate-notes` 还要靠 git 历史算发布说明。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
