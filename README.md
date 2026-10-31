@@ -23,6 +23,22 @@
 每个包内含 `atlas` 可执行文件、README、LICENSE 与 `atlas.toml.example` 配置模板。
 解压后先 `atlas init` 生成配置，再 `atlas start` 开服。
 
+#### macOS 首次运行会被 Gatekeeper 拦住
+
+Release 里的二进制**没有签名也没有公证**（没有 Apple 开发者账号就没法做），
+浏览器下载后会被打上隔离属性 `com.apple.quarantine`，双击运行会提示
+"无法验证开发者"。两种绕法：
+
+```bash
+# 1. 右键点开 → 「打开」→ 再次确认「打开」（只对这一次生效）
+# 2. 或者直接去掉隔离属性
+xattr -dr com.apple.quarantine ./atlas
+```
+
+> 同样地，macOS 的**应用防火墙**默认会拦截 `atlas serve`（2222）与
+> `atlas remote`（2223）监听端口。要从别的机器连进来，得在
+> 「系统设置 → 网络 → 防火墙」里允许 Atlas 传入连接。
+
 源码构建需要 Rust 1.88 以上（edition 2024）：
 
 ```bash
