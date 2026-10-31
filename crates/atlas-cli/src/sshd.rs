@@ -129,9 +129,11 @@ fn run(program: &str, args: &[&str]) -> (bool, String) {
 ///
 /// `private_key` 是供第三方客户端使用的私钥路径（默认 `keys/id_ed25519`）。
 pub fn status(private_key: &std::path::Path) -> Result<Status> {
-    let (installed, running, startup) = service_state();
-
+    // 端口探测先做：macOS 上它就是「服务是否真在收连接」的判据
+    // （launchd 持有监听套接字，sshd 进程按需拉起），要喂给服务状态判定。
     let port_listening = is_port_listening(DEFAULT_SSH_PORT);
+    let (installed, running, startup) = service_state(port_listening);
+
     let private_key_present = private_key.is_file();
 
     // 从**私钥**推导公钥，而不是读 `.pub` 文件——`.pub` 可能陈旧，
@@ -455,7 +457,11 @@ fn service_installed() -> bool {
 }
 
 /// 查询 `(已安装, 运行中, 启动类型)`。
-fn service_state() -> (bool, bool, Option<String>) {
+///
+/// `port_listening` 是端口探测结果（`is_port_listening` 的结果）。
+/// Windows / systemd 的服务状态能直接问出来，这个参数只被 macOS 用到——
+/// 但仍然统一传进来，免得每个后端各探一次端口。
+fn service_state(port_listening: bool) -> (bool, bool, Option<String>) {
     match backend() {
         Backend::Windows => {
             let (ok, text) = run(
@@ -479,7 +485,7 @@ fn service_state() -> (bool, bool, Option<String>) {
             )
         }
         Backend::MacOs => {
-            let (installed, running, startup) = macos_service_state();
+            let (installed, running, startup) = macos_service_state(port_listening);
             (installed, running, startup)
         }
         Backend::Systemd => {
@@ -500,24 +506,70 @@ fn service_state() -> (bool, bool, Option<String>) {
     }
 }
 
+/// macOS 上 OpenSSH 服务的探测结果。
+///
+/// 单独抽出来是为了让判定逻辑能脱离 macOS 单测——本机是 Windows，
+/// `launchctl` 跑不了，但**判定规则**是可以在任何平台验证的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MacOsProbe {
+    /// `launchctl print system/com.openssh.sshd` 是否成功。
+    ///
+    /// 成功即代表服务已加载到 system 域；失败可能是没加载，也可能只是
+    /// 当前用户没权限读 system 域——两种情况都不该断言「服务没装」。
+    print_ok: bool,
+    /// `launchctl print` 输出里有没有 `state = running`。
+    launchd_running: bool,
+    /// `launchctl print-disabled system` 里该标签是否被标成 `=> true`。
+    ///
+    /// 它管的是**开机自启**，跟「当前有没有在收连接」是两件事——
+    /// 手动拉起来跑但没开开机自启是合法状态，两者正交。
+    disabled: bool,
+    /// 22 端口上有没有连接在监听。
+    port_listening: bool,
+}
+
+/// 由探测结果推出 `(运行中, 开机自启)`。
+///
+/// 两个返回值是**正交**的：`运行中` 说现在有没有在收连接，`开机自启` 说的是
+/// 重启机器后会不会自己起来。被禁用只影响后者。
+///
+/// **为什么不能只看 `state = running`**：macOS 的 sshd 由 launchd 以
+/// socket 激活（`inetdCompatibility`）方式托管——launchd 自己持有 22 端口
+/// 的监听套接字，收到连接才拉起 `sshd -i`。于是空闲时：
+///
+/// - launchd 报的是 `state = waiting`，**永远不会是** `running`；
+/// - `ps` 里看不到 `sshd` 进程；
+/// - 但 22 端口**确实在监听**（`lsof -i :22` 显示的是 `launchd` 而不是 `sshd`）。
+///
+/// 所以「有没有在收连接」只能看端口，「服务有没有加载」才看 `launchctl print`。
+/// 端口探测也不需要管理员权限，是唯一在任意账号下都可靠的信号。
+fn macos_decide(p: MacOsProbe) -> (bool, Option<String>) {
+    let running = p.port_listening || p.launchd_running;
+
+    let startup = if p.disabled {
+        Some("disabled".to_owned())
+    } else if p.print_ok || running {
+        Some("on".to_owned())
+    } else {
+        None
+    };
+
+    (running, startup)
+}
+
 /// macOS 上 OpenSSH 服务的 `(运行中, 开机自启)`。
 ///
-/// launchd 的服务状态不在 systemd 那边：`launchctl print system/<标签>` 能读到
-/// 服务的 `state = running`；是否开机自启则看 `launchctl print-disabled system`
-/// 里该标签有没有被标成 `true`（被禁用）。
-fn macos_service_state() -> (bool, bool, Option<String>) {
+/// launchd 的服务状态不在 systemd 那边：
+/// `launchctl print system/<标签>` 能读到即已加载；是否开机自启则看
+/// `launchctl print-disabled system` 里该标签有没有被标成 `true`（被禁用）。
+fn macos_service_state(port_listening: bool) -> (bool, bool, Option<String>) {
     let installed = service_installed();
 
-    // `launchctl print` 在服务未加载时返回非零；部分版本需要 sudo，
-    // 所以读不到时退回到 `launchctl list <标签>`（能列出即已加载）。
     let (print_ok, text) = run(
         "launchctl",
         &["print", &format!("system/{MACOS_SSHD_LABEL}")],
     );
-    let mut running = print_ok && text.lines().any(|l| l.trim() == "state = running");
-    if !print_ok {
-        running = run("launchctl", &["list", MACOS_SSHD_LABEL]).0;
-    }
+    let launchd_running = print_ok && text.lines().any(|l| l.trim() == "state = running");
 
     // 开机自启：被「远程登录」关掉时，launchd 会把该服务标成 disabled。
     let (_, disabled) = run("launchctl", &["print-disabled", "system"]);
@@ -525,13 +577,12 @@ fn macos_service_state() -> (bool, bool, Option<String>) {
         .lines()
         .any(|line| line.contains(MACOS_SSHD_LABEL) && line.contains("=> true"));
 
-    let startup = if is_disabled {
-        Some("disabled".to_owned())
-    } else if running {
-        Some("on".to_owned())
-    } else {
-        None
-    };
+    let (running, startup) = macos_decide(MacOsProbe {
+        print_ok,
+        launchd_running,
+        disabled: is_disabled,
+        port_listening,
+    });
 
     (installed, running, startup)
 }
@@ -610,4 +661,121 @@ fn is_admin() -> bool {
         ],
     );
     ok && text.trim() == "yes"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一份探测结果，只改需要的字段。
+    fn probe() -> MacOsProbe {
+        MacOsProbe {
+            print_ok: true,
+            launchd_running: false,
+            disabled: false,
+            port_listening: false,
+        }
+    }
+
+    #[test]
+    fn macos_端口在监听即视为运行中() {
+        // macOS 的 sshd 由 launchd socket 激活：空闲时 launchd 报 waiting、
+        // ps 里没有 sshd 进程，但 22 端口确实在监听（监听者是 launchd）。
+        let p = MacOsProbe {
+            port_listening: true,
+            ..probe()
+        };
+        let (running, startup) = macos_decide(p);
+        assert!(running, "端口在监听就该算运行中");
+        assert_eq!(startup.as_deref(), Some("on"));
+    }
+
+    #[test]
+    fn macos_空闲时不会误判成未运行() {
+        // 回归点：只看 `state = running` 会把「已加载但空闲」的服务判成没跑。
+        let p = MacOsProbe {
+            print_ok: true,
+            launchd_running: false,
+            port_listening: true,
+            ..probe()
+        };
+        let (running, _) = macos_decide(p);
+        assert!(running);
+    }
+
+    #[test]
+    fn macos_服务已加载但端口没监听算未运行() {
+        // 刚 load 完、或手动 unload 掉 socket 的场景。
+        let (running, startup) = macos_decide(probe());
+        assert!(!running);
+        assert_eq!(
+            startup.as_deref(),
+            Some("on"),
+            "服务已加载仍应报开机自启状态"
+        );
+    }
+
+    #[test]
+    fn macos_launchd报running也算运行中() {
+        // 自建 standalone LaunchDaemon（不走 socket 激活）时端口探测可能拿不到。
+        let p = MacOsProbe {
+            launchd_running: true,
+            ..probe()
+        };
+        let (running, _) = macos_decide(p);
+        assert!(running);
+    }
+
+    #[test]
+    fn macos_被禁用时报disabled() {
+        // 「远程登录」关掉后：服务没加载、端口没监听、开机自启被标成 disabled。
+        let p = MacOsProbe {
+            disabled: true,
+            ..probe()
+        };
+        let (running, startup) = macos_decide(p);
+        assert_eq!(startup.as_deref(), Some("disabled"));
+        assert!(!running, "没在监听就不该报运行中");
+    }
+
+    #[test]
+    fn macos_禁用只影响开机自启不影响当前状态() {
+        // 两个字段是正交的：`disabled` 说的是**开机自启**，`running` 说的是
+        // **当前有没有在收连接**。手动拉起来跑、但没开开机自启是合法状态，
+        // 不能因为看到 disabled 就报「服务未运行」。
+        let p = MacOsProbe {
+            disabled: true,
+            port_listening: true,
+            ..probe()
+        };
+        let (running, startup) = macos_decide(p);
+        assert!(running, "端口在监听就是真在跑");
+        assert_eq!(startup.as_deref(), Some("disabled"));
+    }
+
+    #[test]
+    fn macos_什么读不到时既不报运行也不报自启() {
+        let p = MacOsProbe {
+            print_ok: false,
+            launchd_running: false,
+            disabled: false,
+            port_listening: false,
+        };
+        let (running, startup) = macos_decide(p);
+        assert!(!running);
+        assert_eq!(startup, None);
+    }
+
+    #[test]
+    fn macos_无权限读system域时靠端口兜底() {
+        // `launchctl print system/...` 读不到，但端口在监听 → 服务肯定在跑。
+        let p = MacOsProbe {
+            print_ok: false,
+            port_listening: true,
+            ..probe()
+        };
+        let (running, startup) = macos_decide(p);
+        assert!(running);
+        assert_eq!(startup.as_deref(), Some("on"));
+    }
 }

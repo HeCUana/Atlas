@@ -175,6 +175,15 @@ atlas-cli  →  atlas-core
 
 - macOS **自带** OpenSSH（服务端二进制在 `/usr/libexec/`），**没有** systemd——
   在 macOS 上用 `systemctl` 问服务状态必然查不到。
+- macOS 的 sshd 由 launchd 以 **socket 激活**（`inetdCompatibility`）托管：
+  launchd 自己持有 22 端口的监听套接字，收到连接才拉起 `sshd -i`。后果是
+  **空闲时 launchd 报 `state = waiting`（永远不是 `running`）、`ps` 里没有 `sshd` 进程，
+  但 22 端口确实在监听**（`lsof -i :22` 显示的监听者是 `launchd`）。
+  所以 macOS 上判「服务是否在跑」只能看**端口**，判「服务是否已加载」才看
+  `launchctl print system/com.openssh.sshd`；端口探测不需要管理员权限，
+  是唯一在任意账号下都可靠的信号。
+- `运行中` 与 `开机自启` 在 macOS 上是**正交**的两件事：`disabled` 只影响后者，
+  手动拉起来跑但没开开机自启是合法状态，不能因此报「服务未运行」。
 - macOS 的启停需要管理员权限，而 Atlas 在非交互环境里**没法索取口令**：
   用 `sudo -n`（不弹密码），失败就把**可照抄的命令**给用户，而不是干巴巴地说"权限不足"。
 - **Unix 上必须收紧权限**：`authorized_keys` 要 `0600`、`~/.ssh` 要 `0700`。
@@ -185,7 +194,7 @@ atlas-cli  →  atlas-core
   CI 必须对三个平台都跑 `cargo check --all-targets`，并且**真的把二进制跑起来**
   （`--version` / `--help` / `sshd status`）——只编译不运行，平台差异根本发现不了。
 
-### 4.8 远程 TUI（Atlas 作为服务端）
+### 4.9 远程 TUI（Atlas 作为服务端）
 
 - 远程 TUI 的传输层是 **SSH**（`russh` 服务端 + 通道承载 `ratatui` 界面），
   与 SFTP 服务端复用同一套主机密钥、授权名单与连接管理。
