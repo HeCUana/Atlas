@@ -394,7 +394,7 @@ fn write_private_key(path: &Path, content: &[u8]) -> Result<()> {
     {
         use std::fs::OpenOptions;
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
         let mut file = OpenOptions::new()
             .write(true)
