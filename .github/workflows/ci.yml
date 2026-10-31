@@ -52,7 +52,32 @@ jobs:
           "$BINARY" --version
           "$BINARY" --help > /dev/null
           # 各平台的系统 SSH 服务查询——这是平台差异最集中的地方。
-          "$BINARY" sshd status || true
+          #
+          # `|| true` 只是为了不让「服务没就绪」这种正常状态中断冒烟；
+          # 真正的崩溃（panic）靠下面的输出检查抓——panic 会打出
+          # "panicked at"，正常路径不会。
+          "$BINARY" sshd status > sshd_status.txt 2>&1 || true
+          if grep -q "panicked at" sshd_status.txt; then
+            echo "::error::atlas sshd status 在 ${{ matrix.os }} 上崩溃了"
+            cat sshd_status.txt
+            exit 1
+          fi
+          # 必须打出机器可读的那行摘要，否则说明状态查询根本没跑完。
+          grep -q "installed=" sshd_status.txt || {
+            echo "::error::atlas sshd status 没有输出状态摘要"
+            cat sshd_status.txt
+            exit 1
+          }
+          # macOS 自带 OpenSSH，必须被识别成「已安装」——
+          # 这条断言专门盯平台后端选错（拿 systemd 去问 macOS 就会挂）。
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            grep -q "installed=1" sshd_status.txt || {
+              echo "::error::macOS 自带 OpenSSH，installed 必须是 1"
+              cat sshd_status.txt
+              exit 1
+            }
+          fi
+          cat sshd_status.txt
 
   test:
     name: 单元测试

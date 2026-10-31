@@ -453,6 +453,9 @@ async fn async_run(cli: Cli) -> Result<()> {
                     println!("  主机密钥指纹  {fp}");
                     println!("    ↳ 第三方客户端首次连接弹出的指纹应与此一致");
                 }
+                // 机器可读的一行摘要，给脚本和 CI 断言用（三个平台后端不同，
+                // 只有统一成 key=value 才能跨平台比对）。
+                println!("{}", st.summary_line());
                 println!();
                 if st.authorized_keys_has_private_key {
                     println!("⛔ 严重：authorized_keys 里混有**私钥**内容。");

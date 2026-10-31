@@ -112,6 +112,23 @@ impl Status {
             && self.public_key_installed
             && !self.authorized_keys_has_private_key
     }
+
+    /// 机器可读的一行状态摘要（纯 ASCII）。
+    ///
+    /// 中文标签是给人看的，这一行是给**脚本和 CI** 看的：三个平台跑的是
+    /// 完全不同的后端（服务管理器 / launchd / systemd），只有统一成
+    /// `key=value` 才能在 CI 里断言"这个平台被正确识别了"。
+    ///
+    /// 值域：布尔量是 `0` / `1`，`startup` 是短字符串或 `unknown`。
+    pub fn summary_line(&self) -> String {
+        format!(
+            "installed={} running={} port_listening={} startup={}",
+            u8::from(self.installed),
+            u8::from(self.running),
+            u8::from(self.port_listening),
+            self.startup.as_deref().unwrap_or("unknown"),
+        )
+    }
 }
 
 /// 执行一条系统命令，返回是否成功与标准输出。
@@ -816,6 +833,52 @@ mod tests {
 
     /// 一条合法的公钥（占位内容，格式对就行）。
     const PUBKEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample atlas-test";
+
+    #[test]
+    fn 状态摘要是纯ascii的键值对() {
+        // CI 靠这一行跨平台断言（三个平台的服务后端完全不同），
+        // 所以格式不能变，也不能混进中文。
+        let st = Status {
+            installed: true,
+            running: false,
+            startup: Some("on".to_owned()),
+            port_listening: true,
+            private_key_present: false,
+            public_key_installed: false,
+            public_key_path: None,
+            public_key_file_stale: false,
+            authorized_keys_has_private_key: false,
+            known_host_present: false,
+            host_key_fingerprint: None,
+        };
+        let line = st.summary_line();
+        assert_eq!(line, "installed=1 running=0 port_listening=1 startup=on");
+        assert!(
+            line.is_ascii(),
+            "摘要必须是纯 ASCII，否则 CI 里 grep 会踩到编码问题"
+        );
+    }
+
+    #[test]
+    fn 状态摘要在缺少启动类型时写unknown() {
+        let st = Status {
+            installed: false,
+            running: false,
+            startup: None,
+            port_listening: false,
+            private_key_present: false,
+            public_key_installed: false,
+            public_key_path: None,
+            public_key_file_stale: false,
+            authorized_keys_has_private_key: false,
+            known_host_present: false,
+            host_key_fingerprint: None,
+        };
+        assert_eq!(
+            st.summary_line(),
+            "installed=0 running=0 port_listening=0 startup=unknown"
+        );
+    }
 
     #[test]
     fn 授权写入会自动创建缺失的目录() {
