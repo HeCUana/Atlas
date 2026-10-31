@@ -292,9 +292,6 @@ fn harden_authorized_keys_acl(path: &Path) {
     }
 }
 
-#[cfg(not(windows))]
-fn harden_authorized_keys_acl(_path: &Path) {}
-
 /// 启动服务并设为开机自启。
 pub fn start() -> Result<()> {
     match backend() {

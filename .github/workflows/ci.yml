@@ -39,7 +39,10 @@ jobs:
 
       # 真跑一次二进制。只编译不运行的话，平台差异（比如 macOS 上
       # `atlas sshd status` 走 launchd 而非 systemctl）根本不会被发现。
+      # 显式指定 bash——Windows runner 的默认 shell 是 PowerShell，
+      # 下面这段 bash 语法会被它当 PowerShell 解析而报错。
       - name: 构建并冒烟
+        shell: bash
         run: |
           cargo build --release --target ${{ matrix.target }} -p atlas-cli
           BINARY="target/${{ matrix.target }}/release/atlas"
